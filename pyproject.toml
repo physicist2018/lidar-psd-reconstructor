@@ -1,0 +1,22 @@
+[project]
+name = "solve"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "physicist2018", email = "physicist2018@yandex.ru" }
+]
+requires-python = ">=3.14.6"
+dependencies = [
+    "numpy>=2",
+    "scipy>=1.14",
+    "matplotlib>=3.9",
+    "miepython>=3.3",
+]
+
+[project.scripts]
+solve = "solve:main"
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
