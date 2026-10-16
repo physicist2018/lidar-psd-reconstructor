@@ -7,6 +7,8 @@ from __future__ import annotations
 import numpy as np
 from scipy.interpolate import BSpline
 
+from .kernels import dvol_dlnr_factor
+
 
 def clamped_knots(r0: float, r1: float, degree: int, n_basis: int) -> np.ndarray:
     """Вектор узлов зажатого (clamped) B-сплайнового базиса.
@@ -75,10 +77,15 @@ def quadrature_grid(breaks: np.ndarray, order: int = 24, max_log_span: float = 0
 
 
 def design_matrix(channels, kernels, basis, knots: np.ndarray,
-                  order: int = 24, max_log_span: float = 0.1) -> np.ndarray:
+                  order: int = 24, max_log_span: float = 0.1,
+                  volume: bool = True) -> np.ndarray:
     """Матрица A: A[j, i] = int_{r0}^{r1} K_j(r) B_i(r) dr.
 
     ``kernels`` — экземпляр ``kernels.KernelTable``.
+
+    При ``volume=True`` (по умолчанию) искомое распределение —
+    объёмное F(r) = dV/dln r (n(r) = q(r)·F(r)), поэтому ядра
+    умножаются на пересчётный фактор q(r) = 3/(4π r⁴).
     """
     r_q, w_q = quadrature_grid(np.unique(knots), order, max_log_span)
     j_count = len(channels)
@@ -86,6 +93,8 @@ def design_matrix(channels, kernels, basis, knots: np.ndarray,
     k_vals = np.empty((j_count, r_q.size))
     for j in range(j_count):
         k_vals[j] = kernels.kernel(j, r_q)
+    if volume:
+        k_vals *= dvol_dlnr_factor(r_q)[None, :]
     b_vals = np.empty((n_basis, r_q.size))
     for i, b in enumerate(basis):
         b_vals[i] = b(r_q)

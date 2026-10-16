@@ -28,6 +28,17 @@ from scipy.interpolate import CubicSpline
 UM2_TO_M2 = 1e-12
 
 
+def dvol_dlnr_factor(r) -> np.ndarray:
+    """Переход от dN/dr к dV/dln r:  n(r) = q(r) * F(r).
+
+    Здесь F = dV/dln r, r в мкм, v(r) = (4π/3) r³ — объём частицы:
+      dV/dln r = r * dV/dr = r * (4π/3) r³ * dN/dr = (4π/3) r⁴ n(r),
+    откуда n(r) = 3 F(r) / (4π r⁴) = q(r) F(r).
+    """
+    r = np.asarray(r, dtype=float)
+    return 3.0 / (4.0 * np.pi * r ** 4)
+
+
 class Channel:
     """Один измеряемый канал: ослабление ('alpha') или обратное рассеяние ('beta')."""
 

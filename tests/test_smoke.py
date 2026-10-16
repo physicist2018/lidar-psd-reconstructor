@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 
 from solve import (
@@ -165,21 +167,22 @@ def test_scan_over_refractive_index() -> None:
 
 
 def test_size_moments_physical() -> None:
-    """Моменты положительны и разумны для неотрицательного распределения."""
+    """Моменты объёмного распределения dV/dln r: положительны и разумны."""
     from solve import size_moments
 
-    r = np.geomspace(0.05, 5.0, 200)
-    n = demo_true_distribution(r)  # в м^-3·мкм^-1, амплитуды ~10^8
-    mom = size_moments(n, r)
+    r = np.geomspace(0.02, 5.0, 300)
+    f = demo_true_distribution(r)  # dV/dln r, мкм³/м³
+    mom = size_moments(f, r)
     assert mom["N_m-3"] > 0
     assert mom["vol_mean_um3"] > 0
     assert mom["vol_conc_um3_per_m3"] > 0
-    assert 0.3 < mom["r_eff_um"] < 1.5  # моды 0.08/0.45 мкм
+    assert abs(mom["vol_conc_um3_per_m3"] - 1e8) < 1e6  # Vf+Vc = 1e8 мкм³/м³
+    assert 0.2 < mom["r_eff_um"] < 0.4  # моды 0.15/1.0 мкм, r_eff ~ 0.28
     assert mom["cov_frac"] == 1.0
     # отрицательные артефакты отбрасываются: моменты не отрицательны
-    n2 = n.copy()
-    n2[::5] = -n2[::5]
-    mom2 = size_moments(n2, r)
+    f2 = f.copy()
+    f2[::5] = -f2[::5]
+    mom2 = size_moments(f2, r)
     assert mom2["N_m-3"] >= 0 and mom2["r_eff_um"] >= 0
 
 
@@ -192,8 +195,9 @@ def test_configurable_n_basis() -> None:
     g1 = forward_measurements(channels, kern, demo_true_distribution, 0.05, 5.0)
     r0g = np.geomspace(0.05, 0.3, 2)
     r1g = np.geomspace(2.0, 5.0, 2)
-    common = dict(min_ratio=4.0, gamma_select="fixed", gamma_rel_fixed=0.1,
-                  n_gamma=5, order=12, max_log_span=0.2)
+    common: dict[str, Any] = dict(min_ratio=4.0, gamma_select="fixed",
+                                   gamma_rel_fixed=0.1, n_gamma=5, order=12,
+                                   max_log_span=0.2)
 
     # по умолчанию: n_basis = число каналов (5); с ГУ длина C = 3
     sols, _ = scan_variants(channels, {M: kern}, g1, [2], r0g, r1g, **common)
@@ -270,6 +274,50 @@ def test_smooth_average() -> None:
     inner = interior & mask_sm & (n_raw != 0)
     dev = np.median(np.abs(n_sm[inner] - n_raw[inner]) / np.abs(n_raw[inner]))
     assert dev < 0.1
+
+
+def test_mode_analysis_synthetic() -> None:
+    """Точное восстановление параметров двух логнормальных мод."""
+    from solve import lognormal_volume, mode_analysis
+
+    r = np.geomspace(0.02, 10.0, 600)
+    fine = (4.0e7, 0.15, 1.4)
+    coarse = (6.0e7, 2.0, 1.5)
+    f = lognormal_volume(r, *fine) + lognormal_volume(r, *coarse)
+    modes = mode_analysis(r, f, r_split=0.5)
+
+    vf, rmf, sf, okf = modes["fine"]
+    vc, rmc, sc, okc = modes["coarse"]
+    v, rm, s_, ok = modes["overall"]
+    assert okf and okc and ok
+    # rm и sigma восстанавливаются точно (логнормаль — парабола в ln-координатах)
+    assert abs(rmf - fine[1]) / fine[1] < 0.02
+    assert abs(sf - fine[2]) / fine[2] < 0.02
+    assert abs(rmc - coarse[1]) / coarse[1] < 0.02
+    assert abs(sc - coarse[2]) / coarse[2] < 0.02
+    # объём fine-моды = интеграл по r < 0.5 (≈ Vf, хвост coarse пренебрежимо мал)
+    assert abs(vf - 4.0e7) / 4.0e7 < 0.02
+    assert vc > 0 and v > vf
+
+
+def test_volume_forward_consistency() -> None:
+    """A (volume=True) согласована с прямой квадратурой K·q·B."""
+    from solve import dvol_dlnr_factor
+
+    channels = make_channels()
+    kern = KernelTable(M, channels, 0.1, 5.0, dx_max=0.1)
+    basis, knots = bspline_basis(0.1, 5.0, 2, 5)
+    A = design_matrix(channels, kern, basis, knots, order=12, max_log_span=0.2,
+                      volume=True)
+    r_q, w_q = quadrature_grid(np.unique(knots), order=12, max_log_span=0.2)
+    b_vals = np.array([b(r_q) for b in basis])
+    k_vals = np.array([kern.kernel(j, r_q) for j in range(len(channels))])
+    A_ref = ((k_vals * dvol_dlnr_factor(r_q)) * w_q) @ b_vals.T
+    assert np.allclose(A, A_ref, rtol=1e-10)
+    # с volume=False множитель q не применяется
+    A_plain = design_matrix(channels, kern, basis, knots, order=12,
+                            max_log_span=0.2, volume=False)
+    assert np.allclose(A_plain, (k_vals * w_q) @ b_vals.T, rtol=1e-10)
 
 
 def test_weights_change_result() -> None:

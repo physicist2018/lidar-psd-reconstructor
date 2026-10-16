@@ -1,18 +1,21 @@
-"""solve — восстановление функции распределения частиц по размерам
+"""solve — восстановление объёмного распределения частиц по размерам
 из лидарных коэффициентов (обратное рассеяние и ослабление).
 
 Единицы входных данных: β — 1/(м·ср), α — 1/м (ядра приводятся к м²/м²·ср).
-Восстановленное n(r) — в м⁻³·мкм⁻¹; дополнительно выводятся интегральные
-характеристики: средний объём частиц, объёмная концентрация,
-эффективный радиус.
+Восстанавливается F(r) = dV/dln r (мкм³/м³, объём частиц на логарифми-
+ческий интервал радиуса); дополнительно выводятся интегральные
+характеристики (N, C_v, ⟨V⟩, r_eff) и параметры логнормальных мод
+(Vf, rm_f, σf, Vc, rm_c, σc и общие V, rm, σ).
 
 Метод:
-  * n(r) ищется в виде разложения по базисным B-сплайнам степени 1..4
+  * F(r) ищется в виде разложения по базисным B-сплайнам степени 1..4
     на логарифмически эквидистантной сетке узлов интервала [r0, r1];
     число базисных функций равно числу измеренных коэффициентов M;
     крайние функции базиса исключаются — каждое элементарное решение
-    обращается в ноль на границах: n(r0) = n(r1) = 0;
-  * строится матрица A: A[j, i] = int K_j(r) B_i(r) dr (ядра Mie —
+    обращается в ноль на границах: F(r0) = F(r1) = 0;
+  * связь с числовым распределением: n(r) = dN/dr = F(r)·3/(4π r⁴),
+    поэтому ядра в матрице A умножаются на пересчётный фактор
+    q(r) = 3/(4π r⁴): A[j, i] = int K_j(r)·q(r)·B_i(r) dr (ядра Mie —
     через miepython, с кэширующей таблицей и кубической интерполяцией);
   * система решается МНК с регуляризацией по кривизне (вторая разность)
     ||W(A C - g1)||^2 + gamma^2 ||L C||^2; параметр gamma выбирается
@@ -20,8 +23,11 @@
     или по минимуму невязки Err = sum_j |g_j - g1_j| / g1_j;
   * перебираются окна [r0, r1] (и степени сплайнов), а также сетка
     показателей преломления m; берутся G решений с наименьшей невязкой,
-    по каждому восстанавливается n(r), результат усредняется; среднее
-    по G решениям значение m и есть итоговый показатель преломления.
+    по каждому восстанавливается F(r), результат усредняется и
+    сглаживается; среднее по G решениям значение m и есть итоговый
+    показатель преломления;
+  * по усреднённому F(r) оцениваются параметры логнормальных мод:
+    fine (r < r_split), coarse (r > r_split) и общая логнормаль.
 """
 
 from __future__ import annotations
@@ -33,12 +39,13 @@ import numpy as np
 
 from .basis import quadrature_grid
 from .inverse import ensemble_average, scan_variants
-from .kernels import Channel, KernelTable
+from .kernels import Channel, KernelTable, dvol_dlnr_factor
 
 __all__ = [
     "Channel", "KernelTable", "scan_variants", "ensemble_average",
     "channels_from_data", "forward_measurements",
-    "lognormal", "demo_true_distribution", "main",
+    "lognormal_volume", "demo_true_distribution", "mode_analysis",
+    "size_moments", "main",
 ]
 
 DEMO_BETA_WL_NM = (355, 532, 1064)
@@ -121,15 +128,21 @@ def channels_from_data(data: dict):
 
 
 def forward_measurements(channels, kernels: KernelTable, n_func, r_min, r_max,
-                         order: int = 24, max_log_span: float = 0.05) -> np.ndarray:
+                         order: int = 24, max_log_span: float = 0.05,
+                         volume: bool = True) -> np.ndarray:
     """Прямое моделирование: g1_j = int_{r_min}^{r_max} K_j(r) n(r) dr
 
     с плотной составной квадратурой Гаусса–Лежандра.  При ядрах в м²
-    и n(r) в м⁻³·мкм⁻¹ коэффициенты beta получаются в 1/(м·ср),
-    alpha — в 1/м.
+    коэффициенты beta получаются в 1/(м·ср), alpha — в 1/м.
+
+    При ``volume=True`` (по умолчанию) ``n_func`` задаёт объёмное
+    распределение F(r) = dV/dln r, а интегрируется K_j(r)·q(r)·F(r)
+    (n(r) = q(r)·F(r), q = 3/(4π r⁴)).
     """
     r_q, w_q = quadrature_grid(np.array([r_min, r_max]), order, max_log_span)
     n_q = np.asarray(n_func(r_q), float)
+    if volume:
+        n_q = n_q * dvol_dlnr_factor(r_q)
     out = np.empty(len(channels))
     for j in range(len(channels)):
         out[j] = np.sum(w_q * kernels.kernel(j, r_q) * n_q)
@@ -144,34 +157,34 @@ UM3_TO_M3 = 1e-18  # (1 мкм)^3 = 1e-18 м^3
 
 
 def size_moments(n_avg, r_grid) -> dict:
-    """Интегральные характеристики восстановленного распределения n(r).
+    """Интегральные характеристики восстановленного объёмного распределения
+    F(r) = dV/dln r (мкм³/м³), r в мкм.
 
-    n(r) в м⁻³·мкм⁻¹, r в мкм.  Точки вне покрытия лучших решений
-    (n_avg = NaN) дают нулевой вклад; диапазон покрытия и его доля
-    возвращаются в ``r_cov_min``, ``r_cov_max``, ``cov_frac``.
-    Отрицательные артефакты восстановления отбрасываются (по физическому
-    смыслу n(r) ≥ 0).
+    Точки вне покрытия лучших решений (F = NaN) дают нулевой вклад;
+    диапазон покрытия и его доля возвращаются в ``r_cov_min``,
+    ``r_cov_max``, ``cov_frac``. Отрицательные артефакты восстановления
+    отбрасываются (по физическому смыслу F ≥ 0).
 
-    Оценки:
+    Оценки (n(r) = q(r)·F(r), q = 3/(4π r⁴)):
       N         — числовая концентрация, м⁻³;
+      vol_conc  — объёмная концентрация V = ∫F dln r, мкм³/м³;
       vol_mean  — средний объём частицы, мкм³;
-      vol_conc  — объёмная концентрация, мкм³/м³;
       r_eff     — эффективный радиус, мкм.
     """
     r_grid = np.asarray(r_grid, dtype=float)
     n_arr = np.asarray(n_avg, dtype=float)
     cov = np.isfinite(n_arr)
-    n = np.where(cov, n_arr, 0.0)
-    n = np.maximum(n, 0.0)  # физическое распределение неотрицательно
+    f_arr = np.where(cov, n_arr, 0.0)
+    f_arr = np.maximum(f_arr, 0.0)  # физическое распределение неотрицательно
+    ln_r = np.log(r_grid)
 
-    m0 = np.trapezoid(n, r_grid)                  # ∫ n dr            [м⁻³]
-    m2 = np.trapezoid(n * r_grid ** 2, r_grid)    # ∫ r² n dr
-    m3 = np.trapezoid(n * r_grid ** 3, r_grid)    # ∫ r³ n dr
+    v_conc = np.trapezoid(f_arr, ln_r)                       # ∫F dln r    [мкм³/м³]
+    m_ln1 = np.trapezoid(f_arr / r_grid, ln_r)               # ∫(F/r) dln r
+    n_num = np.trapezoid(f_arr * dvol_dlnr_factor(r_grid),
+                         r_grid)                             # ∫ n dr      [м⁻³]
 
-    vol_conc = (4.0 / 3.0) * np.pi * m3           # мкм³/м³
-    n_num = m0 if m0 > 0 else np.nan
-    vol_mean = vol_conc / n_num if n_num and np.isfinite(n_num) else np.nan
-    r_eff = m3 / m2 if m2 > 0 else np.nan
+    vol_mean = v_conc / n_num if n_num > 0 else np.nan
+    r_eff = v_conc / m_ln1 if m_ln1 > 0 else np.nan          # ∫r³n dr/∫r²n dr
 
     r_cov = r_grid[cov]
     r_cov_min = float(r_cov.min()) if r_cov.size else np.nan
@@ -180,7 +193,7 @@ def size_moments(n_avg, r_grid) -> dict:
     return {
         "N_m-3": float(n_num),
         "vol_mean_um3": float(vol_mean),
-        "vol_conc_um3_per_m3": float(vol_conc),
+        "vol_conc_um3_per_m3": float(v_conc),
         "r_eff_um": float(r_eff),
         "r_cov_min_um": r_cov_min,
         "r_cov_max_um": r_cov_max,
@@ -194,39 +207,143 @@ def _print_moments(mom: dict) -> None:
           f"{mom['r_cov_max_um']:.4g} мкм (доля сетки: {mom['cov_frac'] * 100:.0f}%)")
     v_m3 = mom["vol_mean_um3"] * UM3_TO_M3
     print(f"  числовая концентрация N      = {mom['N_m-3']:.4g} м⁻³")
+    print(f"  объёмная концентрация C_v    = {mom['vol_conc_um3_per_m3']:.4g} мкм³/м³")
     print(f"  средний объём частиц ⟨V⟩    = {mom['vol_mean_um3']:.4g} мкм³ "
           f"({v_m3:.4g} м³)")
-    print(f"  объёмная концентрация C_v    = {mom['vol_conc_um3_per_m3']:.4g} мкм³/м³")
     print(f"  эффективный радиус r_eff      = {mom['r_eff_um']:.4g} мкм")
+
+
+# ----------------------------------------------------------------------
+# логнормальный анализ мод объёмного распределения
+# ----------------------------------------------------------------------
+
+def _fit_lognormal_ln(x, y, w=None):
+    """Фиѭ логнормали к точкам (x = ln r, y = ln F): y = a + b·x + c·x².
+
+    Для логнормали y = ln V − ln(√(2π)·s) − (x−μ)²/(2s²):
+      μ = −b/(2c),  s² = −1/(2c),  V = exp(a − b²/(4c))·√(2π)·s.
+    Возвращает (V, rm, sigma) или (nan, nan, nan), если фит не удался
+    (менее трёх точек или c ≥ 0 — не мода, а «впадина»).
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if x.size < 3:
+        return float("nan"), float("nan"), float("nan")
+    design = np.column_stack([np.ones_like(x), x, x * x])
+    if w is None:
+        coeffs, *_ = np.linalg.lstsq(design, y, rcond=None)
+    else:
+        w = np.asarray(w, dtype=float)
+        wd = design * np.sqrt(w)[:, None]
+        wy = y * np.sqrt(w)
+        coeffs, *_ = np.linalg.lstsq(wd, wy, rcond=None)
+    a, b, c = coeffs
+    if c >= 0 or not np.isfinite(c):
+        return float("nan"), float("nan"), float("nan")
+    mu = -b / (2.0 * c)
+    s2 = -1.0 / (2.0 * c)
+    s = np.sqrt(s2)
+    v = np.exp(a - b * b / (4.0 * c)) * np.sqrt(2.0 * np.pi) * s
+    if not (v > 0 and np.isfinite(v) and np.isfinite(mu)):
+        return float("nan"), float("nan"), float("nan")
+    return float(v), float(np.exp(mu)), float(np.exp(s))
+
+
+def mode_analysis(r_grid, f_avg, r_split: float = 0.5,
+                  w=None) -> dict:
+    """Логнормальный анализ мод объёмного распределения F = dV/dln r.
+
+    fine — по покрытой области r ∈ [r_cov_min, r_split];
+    coarse — r ∈ [r_split, r_cov_max];
+    overall — весь покрытый диапазон.
+
+    Для каждого диапазона:
+      V — интеграл F по ln r (мкм³/м³);
+      rm, sigma — из взвешенного МНК-фита логнормали в координатах
+      (ln r, ln F) (точки с F ≤ 0 исключены, веса — покрытие).
+
+    Возвращает словарь с ключами fine/coarse/overall; каждая запись —
+    (V, rm, sigma, ok), где ok=False означает вырожденный случай.
+    """
+    r_grid = np.asarray(r_grid, dtype=float)
+    f = np.asarray(f_avg, dtype=float)
+    cov = np.isfinite(f)
+    r = r_grid[cov]
+    fv = f[cov]
+    if r.size < 4:
+        nan = (float("nan"), float("nan"), float("nan"), False)
+        return {"fine": nan, "coarse": nan, "overall": nan}
+    wv = None if w is None else np.asarray(w, dtype=float)[cov]
+    r0, r1 = float(r.min()), float(r.max())
+
+    def analyze(mask, r_lo, r_hi):
+        r_sel = r[mask]
+        f_sel = fv[mask]
+        if r_sel.size < 3:
+            return float("nan"), float("nan"), float("nan"), False
+        v = float(np.trapezoid(np.maximum(f_sel, 0.0), np.log(r_sel)))
+        pos = f_sel > 0
+        if pos.sum() < 3:
+            return v, float("nan"), float("nan"), False
+        wts = None if wv is None else wv[mask][pos]
+        v_f, rm, sg = _fit_lognormal_ln(np.log(r_sel[pos]),
+                                        np.log(f_sel[pos]), wts)
+        return v, rm, sg, v > 0 and np.isfinite(v_f)
+
+    fine = (r <= r_split) & (r >= r0)
+    coarse = (r >= r_split) & (r <= r1)
+    overall = np.ones(r.size, dtype=bool)
+    return {
+        "fine": analyze(fine, r0, r_split),
+        "coarse": analyze(coarse, r_split, r1),
+        "overall": analyze(overall, r0, r1),
+    }
+
+
+def _print_modes(modes: dict, r_split: float) -> None:
+    print("\n=== Параметры логнормальных мод (dV/dln r) ===")
+    print(f"  граница раздела мод: {r_split:g} мкм (--r-split)")
+    print(f"  {'мода':<8} {'V, мкм³/м³':>12} {'rm, мкм':>9} {'sigma':>7}")
+    for name in ("fine", "coarse", "overall"):
+        v, rm, sg, ok = modes[name]
+        if ok and np.isfinite(v):
+            print(f"  {name:<8} {v:>12.4g} {rm:>9.4g} {sg:>7.4g}")
+        else:
+            print(f"  {name:<8} {'—':>12} {'—':>9} {'—':>7} (мало данных)")
 
 
 # ----------------------------------------------------------------------
 # демонстрационные данные
 # ----------------------------------------------------------------------
 
-def lognormal(r, r_g: float, sigma: float) -> np.ndarray:
-    """Логнормальное распределение (плотность по радиусу):
-    n(r) = exp(-(ln(r/r_g))^2 / (2 ln^2 sigma)) / (sqrt(2 pi) r ln sigma).
+def lognormal_volume(r, V: float, r_g: float, sigma: float) -> np.ndarray:
+    """Логнормальная мода в объёмном представлении dV/dln r:
+
+    F(r) = V exp(-(ln(r/r_g))^2 / (2 ln^2 sigma)) / (sqrt(2 pi) ln sigma),
+
+    V — интеграл по ln r (объёмная концентрация моды, мкм³/м³),
+    r_g — медианный (модальный) радиус, sigma — геометрическое СКО.
     """
     r = np.asarray(r, float)
     s = np.log(sigma)
-    return np.exp(-(np.log(r / r_g) ** 2) / (2.0 * s * s)) / (np.sqrt(2.0 * np.pi) * r * s)
+    return V / (np.sqrt(2.0 * np.pi) * s) * np.exp(-(np.log(r / r_g) ** 2) / (2.0 * s * s))
 
 
-def demo_true_distribution(r, amps=(2.4e8, 1.2e8), modes=(0.08, 0.45),
-                           sigmas=(1.6, 1.6)) -> np.ndarray:
-    """Тестовая «истинная» функция распределения — бимодальное
-    логнормальное распределение (Айткеновская и аккумулятивная моды).
+DEMO_FINE = (4.0e7, 0.15, 1.5)     # Vf, rm_f, sigma_f (dV/dln r)
+DEMO_COARSE = (6.0e7, 1.2, 1.7)    # Vc, rm_c, sigma_c
 
-    Амплитуды подобраны так, чтобы при физических ядрах (м²) модельные
-    коэффициенты были реалистичны: beta ~ 10⁻⁵ 1/(м·ср), alpha ~ 10⁻⁴ 1/м,
-    числовая концентрация N ~ 10⁸–10⁹ м⁻³.
+
+def demo_true_distribution(r, fine: tuple = DEMO_FINE,
+                           coarse: tuple = DEMO_COARSE) -> np.ndarray:
+    """Тестовая «истинная» функция распределения — сумма двух логнормальных
+    мод в представлении dV/dln r (fine и coarse).
+
+    Параметры (V в мкм³/м³, rm в мкм, sigma безразмерно) подобраны так,
+    чтобы при физических ядрах (м²) модельные коэффициенты были
+    реалистичны: beta ~ 10⁻⁵ 1/(м·ср), alpha ~ 10⁻⁴ 1/м.
     """
     r = np.asarray(r, float)
-    out = np.zeros_like(r)
-    for a, rg, sg in zip(amps, modes, sigmas):
-        out += a * lognormal(r, rg, sg)
-    return out
+    return lognormal_volume(r, *fine) + lognormal_volume(r, *coarse)
 
 
 def _demo_measurements(args, channels, kernels: KernelTable):
@@ -264,8 +381,8 @@ def plot_results(out_path: str, *, r_grid, n_true, n_avg, n_avg_raw, n_best,
                      label="среднее (несглаженное)")
     ax1.semilogx(r_grid, n_avg, "C0-", lw=2.6, label="среднее по лучшим")
     ax1.set_xlabel("r, мкм")
-    ax1.set_ylabel("n(r), отн. ед.")
-    ax1.set_title(f"Функция распределения частиц по размерам, "
+    ax1.set_ylabel("dV/dln r, мкм³/м³")
+    ax1.set_title(f"Объёмное распределение частиц по размерам, "
                   f"⟨m⟩ = {m_avg.real:.3f}{m_avg.imag:+.3f}j")
     ax1.grid(True, which="both", ls=":", alpha=0.5)
     ax1.legend()
@@ -292,7 +409,7 @@ def plot_results(out_path: str, *, r_grid, n_true, n_avg, n_avg_raw, n_best,
 # ----------------------------------------------------------------------
 
 def _json_payload(r_grid, n_avg, n_best, solutions, channels, g1, g_fit,
-                  m_avg, moments, n_avg_raw=None) -> dict:
+                  m_avg, moments, n_avg_raw=None, modes=None) -> dict:
     payload = {
         "m_avg": {"real": m_avg.real, "imag": m_avg.imag},
         "moments": moments,
@@ -314,6 +431,16 @@ def _json_payload(r_grid, n_avg, n_best, solutions, channels, g1, g_fit,
     if n_avg_raw is not None:
         payload["n_avg_raw"] = [None if not np.isfinite(v) else float(v)
                                 for v in n_avg_raw]
+    if modes is not None:
+        payload["modes"] = {
+            k: {
+                "V_um3_per_m3": None if not np.isfinite(v[0]) else float(v[0]),
+                "rm_um": None if not np.isfinite(v[1]) else float(v[1]),
+                "sigma": None if not np.isfinite(v[2]) else float(v[2]),
+                "ok": bool(v[3]),
+            }
+            for k, v in modes.items()
+        }
     return payload
 
 
@@ -334,16 +461,15 @@ def _print_summary(args, solutions, g1, channels, n_avg, g_fit, r_grid,
     print(f"\nсредний показатель преломления (по {min(args.best, len(solutions))} лучшим): "
           f"m = {m_avg.real:.3f}{m_avg.imag:+.3f}j")
 
-    print("\n=== Средняя функция распределения ===")
-    print("ключевые точки n(r) (полная сетка — в --json, при задании):")
+    print("\n=== Средняя функция распределения (dV/dln r) ===")
+    print("ключевые точки (полная сетка — в --json, при задании):")
     idx = np.linspace(0, r_grid.size - 1, min(7, r_grid.size)).astype(int)
     for i in idx:
         r = r_grid[i]
         if not np.isfinite(n_avg[i]):
-            print(f"  r = {r:9.4g} мкм,  n(r) = нет покрытия (вне окон лучших решений)")
+            print(f"  r = {r:9.4g} мкм,  dV/dln r = нет покрытия (вне окон лучших решений)")
             continue
-        n1 = r * n_avg[i]
-        print(f"  r = {r:9.4g} мкм,  n(r) = {n_avg[i]:.4g},  dN/dln r = {n1:.4g}")
+        print(f"  r = {r:9.4g} мкм,  dV/dln r = {n_avg[i]:.4g} мкм³/м³")
 
     print("\n=== Согласие по каналам (среднее решение) ===")
     for j, ch in enumerate(channels):
@@ -403,6 +529,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--smooth-lam", type=float, default=1e-4,
                    help="относительный параметр сглаживания среднего "
                         "(нормированная шкала, безразмерный) [1e-4]")
+    p.add_argument("--r-split", type=float, default=0.5,
+                   help="граница разделения fine/coarse мод для анализа, мкм [0.5]")
     p.add_argument("--absolute", action="store_true",
                    help="МНК по абсолютным невязкам (по умолчанию веса 1/g1)")
     p.add_argument("--dx-max", type=float, default=0.1,
@@ -540,7 +668,8 @@ def main(argv=None) -> None:
     n_avg_raw = ensemble_average(solutions, args.best, r_grid, smooth=False)[0]
 
     # расчётные g для усреднённых решения и показателя преломления:
-    # ядра усредняются по G лучшим решениям (по их m)
+    # ядра усредняются по G лучшим решениям (по их m), распределение —
+    # объёмное F = dV/dln r, поэтому ядра умножаются на q(r) = 3/(4π r⁴)
     r_q, w_q = quadrature_grid(np.array([args.r0_min, args.r1_max]),
                                args.quad_order, args.log_span)
     n_q = np.interp(r_q, r_grid, np.nan_to_num(n_avg, nan=0.0))
@@ -550,9 +679,10 @@ def main(argv=None) -> None:
         tbl = tables[s.m]
         for j in range(len(channels)):
             kern_sum[j] += tbl.kernel(j, r_q)
+    q_vals = dvol_dlnr_factor(r_q)
     g_fit = np.empty(len(channels))
     for j in range(len(channels)):
-        g_fit[j] = np.sum(w_q * (kern_sum[j] / len(g_best)) * n_q)
+        g_fit[j] = np.sum(w_q * (kern_sum[j] / len(g_best)) * q_vals * n_q)
 
     names = [ch.name for ch in channels]
     _print_summary(args, solutions, g1, channels, n_avg, g_fit, r_grid, m_avg)
@@ -560,11 +690,18 @@ def main(argv=None) -> None:
     moments = size_moments(n_avg, r_grid)
     _print_moments(moments)
 
+    # кратность покрытия точек сетки лучшими решениями — веса анализа мод
+    count = np.zeros(r_grid.size)
+    for s in g_best:
+        count += (r_grid >= s.r0) & (r_grid <= s.r1)
+    modes = mode_analysis(r_grid, n_avg, r_split=args.r_split, w=count)
+    _print_modes(modes, args.r_split)
+
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump(_json_payload(r_grid, n_avg, n_best, solutions,
                                     channels, g1, g_fit, m_avg, moments,
-                                    n_avg_raw=n_avg_raw),
+                                    n_avg_raw=n_avg_raw, modes=modes),
                       fh, indent=2)
         print(f"результаты сохранены: {args.json}")
 
