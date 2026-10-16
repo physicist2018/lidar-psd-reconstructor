@@ -286,10 +286,11 @@ def test_mode_analysis_synthetic() -> None:
     f = lognormal_volume(r, *fine) + lognormal_volume(r, *coarse)
     modes = mode_analysis(r, f, r_split=0.5)
 
-    vf, rmf, sf, okf = modes["fine"]
-    vc, rmc, sc, okc = modes["coarse"]
-    v, rm, s_, ok = modes["overall"]
+    vf, rmf, sf, okf, mf = modes["fine"]
+    vc, rmc, sc, okc, mc = modes["coarse"]
+    v, rm, s_, ok, mo = modes["overall"]
     assert okf and okc and ok
+    assert mf == "fit" and mc == "fit"
     # rm и sigma восстанавливаются точно (логнормаль — парабола в ln-координатах)
     assert abs(rmf - fine[1]) / fine[1] < 0.02
     assert abs(sf - fine[2]) / fine[2] < 0.02
@@ -298,6 +299,23 @@ def test_mode_analysis_synthetic() -> None:
     # объём fine-моды = интеграл по r < 0.5 (≈ Vf, хвост coarse пренебрежимо мал)
     assert abs(vf - 4.0e7) / 4.0e7 < 0.02
     assert vc > 0 and v > vf
+
+
+def test_mode_fallback_moments() -> None:
+    """Если фит одной логнормали вырождается (далеко разнесённые моды —
+    суммарная кривая не парабола), rm/sigma оцениваются по объёмным
+    моментам и всегда конечны."""
+    from solve import lognormal_volume, mode_analysis
+
+    r = np.geomspace(0.02, 10.0, 400)
+    f = (lognormal_volume(r, 4.0e7, 0.15, 1.4)
+         + lognormal_volume(r, 6.0e7, 5.0, 1.5))
+    modes = mode_analysis(r, f, r_split=0.5)
+    v, rm, sg, ok, method = modes["overall"]
+    assert ok and np.isfinite(v)
+    assert method in ("fit", "moments")
+    assert np.isfinite(rm) and rm > 0
+    assert np.isfinite(sg) and sg > 1
 
 
 def test_volume_forward_consistency() -> None:

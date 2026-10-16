@@ -260,10 +260,15 @@ def mode_analysis(r_grid, f_avg, r_split: float = 0.5,
     Для каждого диапазона:
       V — интеграл F по ln r (мкм³/м³);
       rm, sigma — из взвешенного МНК-фита логнормали в координатах
-      (ln r, ln F) (точки с F ≤ 0 исключены, веса — покрытие).
+      (ln r, ln F) (точки с F ≤ 0 исключены, веса — покрытие). Если фит
+      вырождается (например, суммарное бимодальное распределение не
+      аппроксимируется одной логнормалью), rm и sigma оцениваются по
+      объёмным моментам: rm = exp⟨ln r⟩_V, sigma = exp(СКО ln r)_V.
 
     Возвращает словарь с ключами fine/coarse/overall; каждая запись —
-    (V, rm, sigma, ok), где ok=False означает вырожденный случай.
+    (V, rm, sigma, ok, method), где ok=False означает, что данных
+    недостаточно либо объём неположителен; method — "fit", "moments"
+    или описание причины неудачи.
     """
     r_grid = np.asarray(r_grid, dtype=float)
     f = np.asarray(f_avg, dtype=float)
@@ -271,7 +276,8 @@ def mode_analysis(r_grid, f_avg, r_split: float = 0.5,
     r = r_grid[cov]
     fv = f[cov]
     if r.size < 4:
-        nan = (float("nan"), float("nan"), float("nan"), False)
+        nan = (float("nan"), float("nan"), float("nan"), False,
+               "недостаточно точек")
         return {"fine": nan, "coarse": nan, "overall": nan}
     wv = None if w is None else np.asarray(w, dtype=float)[cov]
     r0, r1 = float(r.min()), float(r.max())
@@ -280,15 +286,28 @@ def mode_analysis(r_grid, f_avg, r_split: float = 0.5,
         r_sel = r[mask]
         f_sel = fv[mask]
         if r_sel.size < 3:
-            return float("nan"), float("nan"), float("nan"), False
+            return (float("nan"), float("nan"), float("nan"), False,
+                    "недостаточно точек")
         v = float(np.trapezoid(np.maximum(f_sel, 0.0), np.log(r_sel)))
+        if not (v > 0 and np.isfinite(v)):
+            return (float("nan"), float("nan"), float("nan"), False,
+                    "нет положительного объёма")
         pos = f_sel > 0
         if pos.sum() < 3:
-            return v, float("nan"), float("nan"), False
+            return v, float("nan"), float("nan"), False, "мало точек с F > 0"
         wts = None if wv is None else wv[mask][pos]
         v_f, rm, sg = _fit_lognormal_ln(np.log(r_sel[pos]),
                                         np.log(f_sel[pos]), wts)
-        return v, rm, sg, v > 0 and np.isfinite(v_f)
+        if np.isfinite(v_f) and v_f > 0 and np.isfinite(rm):
+            return v, rm, sg, True, "fit"
+        # моментная оценка (эквивалентная логнормаль по объёмным моментам)
+        x = np.log(r_sel[pos])
+        wts_f = np.asarray(f_sel[pos], dtype=float)
+        wsum = float(np.sum(wts_f))
+        mu = float(np.sum(wts_f * x) / wsum)
+        s2 = float(np.sum(wts_f * (x - mu) ** 2) / wsum)
+        s2 = s2 if (s2 > 0 and np.isfinite(s2)) else 0.0
+        return v, float(np.exp(mu)), float(np.exp(np.sqrt(s2))), True, "moments"
 
     fine = (r <= r_split) & (r >= r0)
     coarse = (r >= r_split) & (r <= r1)
@@ -303,13 +322,14 @@ def mode_analysis(r_grid, f_avg, r_split: float = 0.5,
 def _print_modes(modes: dict, r_split: float) -> None:
     print("\n=== Параметры логнормальных мод (dV/dln r) ===")
     print(f"  граница раздела мод: {r_split:g} мкм (--r-split)")
-    print(f"  {'мода':<8} {'V, мкм³/м³':>12} {'rm, мкм':>9} {'sigma':>7}")
+    print(f"  {'мода':<8} {'V, мкм³/м³':>12} {'rm, мкм':>9} {'sigma':>7}   примечание")
     for name in ("fine", "coarse", "overall"):
-        v, rm, sg, ok = modes[name]
-        if ok and np.isfinite(v):
-            print(f"  {name:<8} {v:>12.4g} {rm:>9.4g} {sg:>7.4g}")
+        v, rm, sg, ok, method = modes[name]
+        if ok:
+            note = "" if method == "fit" else f"({method})"
+            print(f"  {name:<8} {v:>12.4g} {rm:>9.4g} {sg:>7.4g}   {note}")
         else:
-            print(f"  {name:<8} {'—':>12} {'—':>9} {'—':>7} (мало данных)")
+            print(f"  {name:<8} {'—':>12} {'—':>9} {'—':>7}   {method}")
 
 
 # ----------------------------------------------------------------------
@@ -438,6 +458,7 @@ def _json_payload(r_grid, n_avg, n_best, solutions, channels, g1, g_fit,
                 "rm_um": None if not np.isfinite(v[1]) else float(v[1]),
                 "sigma": None if not np.isfinite(v[2]) else float(v[2]),
                 "ok": bool(v[3]),
+                "method": v[4],
             }
             for k, v in modes.items()
         }
