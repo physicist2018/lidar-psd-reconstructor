@@ -27,11 +27,23 @@ def clamped_knots(r0: float, r1: float, degree: int, n_basis: int) -> np.ndarray
     )
 
 
-def bspline_basis(r0: float, r1: float, degree: int, n_basis: int):
+def bspline_basis(r0: float, r1: float, degree: int, n_basis: int,
+                  interior_only: bool = False):
     """Список из ``n_basis`` B-сплайнов (объекты scipy BSpline, степени
-    ``degree``; образуют разбиение единицы на [r0, r1]) и вектор узлов."""
+    ``degree``; образуют разбиение единицы на [r0, r1]) и вектор узлов.
+
+    При ``interior_only=True`` из базиса исключаются первая и последняя
+    функции (B_0 и B_{n-1}): все оставшиеся функции равны нулю на обоих
+    концах [r0, r1], т.е. любое разложение по ним автоматически
+    удовлетворяет однородным граничным условиям n(r0) = n(r1) = 0.
+    Вектор узлов при этом не меняется.
+    """
     knots = clamped_knots(r0, r1, degree, n_basis)
     basis = [BSpline(knots, e, degree, extrapolate=False) for e in np.eye(n_basis)]
+    if interior_only:
+        if n_basis < 3:
+            raise ValueError("граничные условия n(r0)=n(r1)=0 требуют n_basis >= 3")
+        basis = basis[1:-1]
     return basis, knots
 
 

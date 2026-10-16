@@ -10,6 +10,8 @@
   * n(r) ищется в виде разложения по базисным B-сплайнам степени 1..4
     на логарифмически эквидистантной сетке узлов интервала [r0, r1];
     число базисных функций равно числу измеренных коэффициентов M;
+    крайние функции базиса исключаются — каждое элементарное решение
+    обращается в ноль на границах: n(r0) = n(r1) = 0;
   * строится матрица A: A[j, i] = int K_j(r) B_i(r) dr (ядра Mie —
     через miepython, с кэширующей таблицей и кубической интерполяцией);
   * система решается МНК с регуляризацией по кривизне (вторая разность)
@@ -383,6 +385,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="фиксированный gamma относительно ||A||_2 (для --gamma-select fixed) [0.1]")
     p.add_argument("--nonneg", action="store_true",
                    help="накладывать ограничение C >= 0 (тогда n(r) >= 0)")
+    p.add_argument("--no-zero-boundary", action="store_true",
+                   help="не накладывать граничные условия n(r0)=n(r1)=0 "
+                        "(по умолчанию крайние базисные функции исключаются)")
     p.add_argument("--absolute", action="store_true",
                    help="МНК по абсолютным невязкам (по умолчанию веса 1/g1)")
     p.add_argument("--dx-max", type=float, default=0.1,
@@ -436,6 +441,8 @@ def main(argv=None) -> None:
     for ch in channels:
         print(f"  канал: {ch.name}")
     print("входные единицы: β [1/(м·ср)], α [1/м]")
+    bc = "выключено (--no-zero-boundary)" if args.no_zero_boundary else "включено"
+    print(f"граничные условия n(r0)=n(r1)=0 (каждое элементарное решение): {bc}")
     print(f"показатель преломления m (исходный/истинный) = {m.real:g} {m.imag:+g}j")
 
     # ---- сетка показателя преломления для перебора ----
@@ -491,6 +498,7 @@ def main(argv=None) -> None:
         relative=not args.absolute,
         gamma_select=args.gamma_select,
         gamma_rel_fixed=args.gamma_rel if args.gamma_select == "fixed" else None,
+        zero_boundary=not args.no_zero_boundary,
         order=args.quad_order, max_log_span=args.log_span,
     )
     if not solutions:

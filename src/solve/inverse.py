@@ -132,11 +132,16 @@ def scan_variants(channels, kernels_map: dict, g1: np.ndarray, degrees,
                   relative: bool = True,
                   gamma_select: str = "fixed",
                   gamma_rel_fixed: float | None = None,
+                  zero_boundary: bool = True,
                   order: int = 24, max_log_span: float = 0.1):
     """Перебор (показатель преломления m, r0, r1, степень) с выбором gamma.
 
     ``kernels_map`` — словарь {m: KernelTable} (таблицы ядер для каждого m
     из сетки перебора).
+
+    ``zero_boundary`` — при True из разложения исключаются крайние базисные
+    функции: каждое решение удовлетворяет n(r0) = n(r1) = 0 (однородные
+    граничные условия).
 
     ``gamma_select``:
       "fixed" — фиксированный gamma_rel (относительно ||A||_2).
@@ -169,7 +174,8 @@ def scan_variants(channels, kernels_map: dict, g1: np.ndarray, degrees,
                 for r1 in r1_grid:
                     if r1 < min_ratio * r0:
                         continue
-                    basis, knots = bspline_basis(r0, r1, degree, n_basis)
+                    basis, knots = bspline_basis(r0, r1, degree, n_basis,
+                                                  interior_only=zero_boundary)
                     A = design_matrix(channels, kernels, basis, knots,
                                       order=order, max_log_span=max_log_span)
                     s0 = np.linalg.norm(A, 2)

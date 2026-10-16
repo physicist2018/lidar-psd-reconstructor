@@ -48,6 +48,40 @@ def test_basis_partition_of_unity() -> None:
             assert np.all(np.isnan(b(r_out))), f"степень {k}"
 
 
+def test_boundary_zero() -> None:
+    """Граничные условия: каждая функция внутреннего базиса (и любое
+    разложение по нему) равна нулю в точках r0 и r1."""
+    from solve import forward_measurements
+
+    # 1) базис: все функции interior_only-базиса нулевые на концах
+    for k in (1, 2, 3, 4):
+        basis, _knots = bspline_basis(0.1, 5.0, k, 5, interior_only=True)
+        assert len(basis) == 3  # M - 2
+        for b in basis:
+            v0 = float(b(np.array([0.1]))[0])
+            v1 = float(b(np.array([5.0]))[0])
+            assert abs(v0) < 1e-12, f"степень {k}: B(r0)={v0}"
+            assert abs(v1) < 1e-12, f"степень {k}: B(r1)={v1}"
+
+    # 2) сквозной прогон: n(r0) = n(r1) = 0 у каждого решения
+    channels = make_channels()
+    kern = KernelTable(M, channels, 0.05, 5.0, dx_max=0.1)
+    g1 = forward_measurements(channels, kern, demo_true_distribution, 0.05, 5.0)
+    sols, _scale = scan_variants(
+        channels, {M: kern}, g1, [2], np.geomspace(0.05, 0.3, 2),
+        np.geomspace(2.0, 5.0, 2),
+        min_ratio=4.0, gamma_select="fixed", gamma_rel_fixed=0.1, n_gamma=5,
+        zero_boundary=True, order=12, max_log_span=0.2,
+    )
+    assert sols
+    for s in sols:
+        assert len(s.C) == 3  # M - 2 коэффициентов
+        n0 = float(s.distribution(np.array([s.r0]))[0])
+        n1 = float(s.distribution(np.array([s.r1]))[0])
+        assert abs(n0) < 1e-9, f"n(r0)={n0}"
+        assert abs(n1) < 1e-9, f"n(r1)={n1}"
+
+
 def test_second_diff_matrix() -> None:
     L = second_diff_matrix(5)
     assert L.shape == (3, 5)
