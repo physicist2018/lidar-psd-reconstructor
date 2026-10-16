@@ -243,7 +243,7 @@ def _demo_measurements(args, channels, kernels: KernelTable):
 # построение графиков
 # ----------------------------------------------------------------------
 
-def plot_results(out_path: str, *, r_grid, n_true, n_avg, n_best,
+def plot_results(out_path: str, *, r_grid, n_true, n_avg, n_avg_raw, n_best,
                  solutions, names, g1, g_fit, m_avg) -> bool:
     """Два панно: n(r) (log-log) и сравнение измеренных g1 с расчётными g."""
     try:
@@ -259,6 +259,9 @@ def plot_results(out_path: str, *, r_grid, n_true, n_avg, n_best,
         ax1.semilogx(r_grid, n_true, "k--", lw=1.6, label="истинное n(r)")
     for n_s in n_best:
         ax1.semilogx(r_grid, n_s, color="0.75", lw=1.0)
+    if n_avg_raw is not None and not np.array_equal(np.nan_to_num(n_avg), np.nan_to_num(n_avg_raw)):
+        ax1.semilogx(r_grid, n_avg_raw, color="darkorange", lw=1.0, ls=":",
+                     label="среднее (несглаженное)")
     ax1.semilogx(r_grid, n_avg, "C0-", lw=2.6, label="среднее по лучшим")
     ax1.set_xlabel("r, мкм")
     ax1.set_ylabel("n(r), отн. ед.")
@@ -289,8 +292,8 @@ def plot_results(out_path: str, *, r_grid, n_true, n_avg, n_best,
 # ----------------------------------------------------------------------
 
 def _json_payload(r_grid, n_avg, n_best, solutions, channels, g1, g_fit,
-                  m_avg, moments) -> dict:
-    return {
+                  m_avg, moments, n_avg_raw=None) -> dict:
+    payload = {
         "m_avg": {"real": m_avg.real, "imag": m_avg.imag},
         "moments": moments,
         "units_input": {"beta": "1/(м*ср)", "alpha": "1/м"},
@@ -308,6 +311,10 @@ def _json_payload(r_grid, n_avg, n_best, solutions, channels, g1, g_fit,
             for t, s in enumerate(solutions)
         ],
     }
+    if n_avg_raw is not None:
+        payload["n_avg_raw"] = [None if not np.isfinite(v) else float(v)
+                                for v in n_avg_raw]
+    return payload
 
 
 def _print_summary(args, solutions, g1, channels, n_avg, g_fit, r_grid,
@@ -390,6 +397,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--no-zero-boundary", action="store_true",
                    help="не накладывать граничные условия n(r0)=n(r1)=0 "
                         "(по умолчанию крайние базисные функции исключаются)")
+    p.add_argument("--no-smooth", action="store_true",
+                   help="не сглаживать среднее по лучшим решениям "
+                        "(по умолчанию — сглаживающий сплайн)")
+    p.add_argument("--smooth-lam", type=float, default=1e-4,
+                   help="относительный параметр сглаживания среднего "
+                        "(нормированная шкала, безразмерный) [1e-4]")
     p.add_argument("--absolute", action="store_true",
                    help="МНК по абсолютным невязкам (по умолчанию веса 1/g1)")
     p.add_argument("--dx-max", type=float, default=0.1,
@@ -445,6 +458,9 @@ def main(argv=None) -> None:
     print("входные единицы: β [1/(м·ср)], α [1/м]")
     bc = "выключено (--no-zero-boundary)" if args.no_zero_boundary else "включено"
     print(f"граничные условия n(r0)=n(r1)=0 (каждое элементарное решение): {bc}")
+    sm = "выключено (--no-smooth)" if args.no_smooth else \
+        f"включено (rel-lam={args.smooth_lam:g})"
+    print(f"сглаживание среднего по лучшим решениям: {sm}")
     nb = args.n_basis if args.n_basis is not None else len(channels)
     if not args.no_zero_boundary:
         print(f"базисных функций на окно: {nb} (с ГУ неизвестных: {nb - 2})")
@@ -517,7 +533,11 @@ def main(argv=None) -> None:
                          "проверьте границы и min-ratio")
 
     r_grid = np.geomspace(args.r0_min, args.r1_max, 256)
-    n_avg, n_best, m_avg = ensemble_average(solutions, args.best, r_grid)
+    n_avg, n_best, m_avg = ensemble_average(solutions, args.best, r_grid,
+                                            smooth=not args.no_smooth,
+                                            lam_rel=args.smooth_lam)
+    # сырое (несглаженное) среднее — для сравнения на графике и в JSON
+    n_avg_raw = ensemble_average(solutions, args.best, r_grid, smooth=False)[0]
 
     # расчётные g для усреднённых решения и показателя преломления:
     # ядра усредняются по G лучшим решениям (по их m)
@@ -543,11 +563,13 @@ def main(argv=None) -> None:
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump(_json_payload(r_grid, n_avg, n_best, solutions,
-                                    channels, g1, g_fit, m_avg, moments),
+                                    channels, g1, g_fit, m_avg, moments,
+                                    n_avg_raw=n_avg_raw),
                       fh, indent=2)
         print(f"результаты сохранены: {args.json}")
 
     if not args.no_plot:
         plot_results(args.out, r_grid=r_grid, n_true=n_true(r_grid) if n_true else None,
-                     n_avg=n_avg, n_best=n_best, solutions=solutions[: args.best],
+                     n_avg=n_avg, n_avg_raw=n_avg_raw, n_best=n_best,
+                     solutions=solutions[: args.best],
                      names=names, g1=g1, g_fit=np.asarray(g_fit), m_avg=m_avg)

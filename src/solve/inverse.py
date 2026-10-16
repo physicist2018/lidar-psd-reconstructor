@@ -231,7 +231,58 @@ def scan_variants(channels, kernels_map: dict, g1: np.ndarray, degrees,
     return solutions, scale
 
 
-def ensemble_average(solutions: list[Solution], n_best: int, r_grid: np.ndarray):
+def smooth_distribution(r_grid: np.ndarray, n_avg: np.ndarray,
+                        w: np.ndarray | None = None,
+                        lam_rel: float | None = None) -> np.ndarray:
+    """Сглаживание среднего по лучшим решениям сглаживающим сплайном.
+
+    Кубический сглаживающий сплайн строится в нормированных координатах
+    (аргумент — логарифм радиуса, приведённый к [0, 1]; значения —
+    n/max|n|), поэтому параметр ``lam_rel`` безразмерен и переносится
+    между наборами данных. По умолчанию ``lam_rel = 1e-4`` (подобран по
+    демо: убирает изломы на границах окон без искажения формы).
+
+    Веса ``w`` — обычно кратность покрытия точек; крайние точки покрытия
+    дополнительно притягиваются к своим сырым значениям (веса краёв
+    усилены), чтобы сглаживание не давало артефактов на границах.
+
+    Точки вне покрытия (NaN в ``n_avg``) в аппроксимации не участвуют и
+    в результате остаются NaN. Возвращает массив той же формы, что n_avg.
+    """
+    from scipy.interpolate import make_smoothing_spline
+
+    r_grid = np.asarray(r_grid, dtype=float)
+    n_avg = np.asarray(n_avg, dtype=float)
+    ok = np.isfinite(n_avg)
+    if ok.sum() < 4:  # сглаживающему сплайну нужно достаточно точек
+        return n_avg.copy()
+    if lam_rel is None:
+        lam_rel = 1e-4
+
+    t = np.log(r_grid[ok])
+    t = (t - t[0]) / (t[-1] - t[0])          # -> [0, 1]
+    y = n_avg[ok].astype(float)
+    scale = np.max(np.abs(y))
+    if scale <= 0 or not np.isfinite(scale):
+        return n_avg.copy()
+    ys = y / scale
+
+    if w is None:
+        wts = np.ones_like(ys)
+    else:
+        wts = np.asarray(w, dtype=float)[ok]
+    wmax = float(np.max(wts)) if wts.size else 1.0
+    wts = wts / max(wmax, 1e-300)
+    wts[0] = wts[-1] = 1e3   # привязка краёв покрытия к сырым значениям
+
+    spl = make_smoothing_spline(t, ys, w=wts, lam=lam_rel)
+    out = np.full_like(n_avg, np.nan)
+    out[ok] = spl(t) * scale
+    return out
+
+
+def ensemble_average(solutions: list[Solution], n_best: int, r_grid: np.ndarray,
+                     smooth: bool = True, lam_rel: float | None = None):
     """Среднее по ``n_best`` лучшим решениям на общей сетке r_grid.
 
     В каждой точке r усредняются только те решения, чьё окно [r0, r1]
@@ -239,10 +290,17 @@ def ensemble_average(solutions: list[Solution], n_best: int, r_grid: np.ndarray)
     данный диапазон размеров, его нельзя интерпретировать как n(r) = 0.
     Точки, не покрытые ни одним решением, получают NaN.
 
+    При ``smooth=True`` к среднему применяется сглаживание
+    (``smooth_distribution``, относительный параметр ``lam_rel``) —
+    поточечное среднее решений с разными узлами сплайнов и границами
+    окон изломается на границах покрытия, сглаженная кривая убирает
+    эти изломы.
+
     Показатель преломления усредняется по тем же ``n_best`` решениям
     (простое среднее комплексных значений).
 
-    Возвращает (n_avg, n_best_matrix, m_avg).
+    Возвращает (n_avg, n_best_matrix, m_avg), где n_avg — сглаженное
+    (или исходное, если ``smooth=False``) среднее.
     """
     n_best = max(1, min(n_best, len(solutions)))
     r_grid = np.asarray(r_grid, dtype=float)
@@ -258,6 +316,8 @@ def ensemble_average(solutions: list[Solution], n_best: int, r_grid: np.ndarray)
     n_avg = np.full(n, np.nan)
     ok = count > 0
     n_avg[ok] = total[ok] / count[ok]
+    if smooth:
+        n_avg = smooth_distribution(r_grid, n_avg, w=count, lam_rel=lam_rel)
     best = solutions[:n_best]
     m_avg = complex(sum(s.m for s in best) / n_best)
     return n_avg, ns, m_avg

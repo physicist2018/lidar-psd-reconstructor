@@ -225,6 +225,53 @@ def test_configurable_n_basis() -> None:
         assert any("недоопределен" in str(x.message) for x in w)
 
 
+def test_smooth_average() -> None:
+    """Сглаженное среднее: конечно, сохраняет маску покрытия, глаже сырого,
+    на краях покрытия близко к нулю (граничные условия)."""
+    from solve import forward_measurements
+
+    channels = make_channels()
+    kern = KernelTable(M, channels, 0.05, 5.0, dx_max=0.1)
+    g1 = forward_measurements(channels, kern, demo_true_distribution, 0.05, 5.0)
+    r0g = np.geomspace(0.05, 0.3, 2)
+    r1g = np.geomspace(2.0, 5.0, 2)
+    sols, _ = scan_variants(
+        channels, {M: kern}, g1, [2], r0g, r1g,
+        min_ratio=4.0, gamma_select="fixed", gamma_rel_fixed=0.1, n_gamma=5,
+        order=12, max_log_span=0.2,
+    )
+    rg = np.geomspace(0.05, 5.0, 300)
+    n_sm, _ns, _m = ensemble_average(sols, 3, rg, smooth=True)
+    n_raw, _ns2, _m2 = ensemble_average(sols, 3, rg, smooth=False)
+
+    # маска покрытия одинакова и совпадает с конечностью
+    mask_sm = np.isfinite(n_sm)
+    mask_raw = np.isfinite(n_raw)
+    assert np.array_equal(mask_sm, mask_raw)
+    assert mask_sm.sum() > 10
+
+    # значения, покрытые хотя бы двумя решениями, не портятся
+    inner = mask_sm & (rg >= r0g[0])  # внутри покрытия
+    assert np.all(np.isfinite(n_sm[inner]))
+
+    # гладкость: суммарная вариация первых разностей (по log r) у сглаженного
+    # не больше, чем у сырого (с запасом на границах)
+    interior = (rg >= 0.07) & (rg <= 4.0)  # без краёв покрытия
+    tv = lambda y: float(np.sum(np.abs(np.diff(y[interior & mask_sm]))))  # noqa: E731
+    assert tv(n_sm) <= tv(n_raw) * 1.1 + 1e-12
+
+    # края покрытой области притянуты к сырым значениям (нет артефактов)
+    idx = np.where(mask_sm)[0]
+    peak = max(np.nanmax(np.abs(n_raw)), 1e-9)
+    for i in (idx[0], idx[-1]):
+        assert abs(n_sm[i] - n_raw[i]) <= 0.02 * peak
+
+    # во внутренней области сглаженное близко к сырому (медиана < 10%)
+    inner = interior & mask_sm & (n_raw != 0)
+    dev = np.median(np.abs(n_sm[inner] - n_raw[inner]) / np.abs(n_raw[inner]))
+    assert dev < 0.1
+
+
 def test_weights_change_result() -> None:
     """Веса 1/g1 (относительные) меняют решение переопределённой системы."""
     rng = np.random.default_rng(0)
