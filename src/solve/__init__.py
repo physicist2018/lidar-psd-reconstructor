@@ -39,7 +39,7 @@ import numpy as np
 
 from .basis import quadrature_grid
 from .inverse import ensemble_average, scan_variants
-from .kernels import Channel, KernelTable, dvol_dlnr_factor
+from .kernels import Channel, KernelTable, dvol_dlnr_factor, mie_jit_enabled, set_mie_jit
 
 __all__ = [
     "Channel", "KernelTable", "scan_variants", "ensemble_average",
@@ -556,6 +556,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="МНК по абсолютным невязкам (по умолчанию веса 1/g1)")
     p.add_argument("--dx-max", type=float, default=0.1,
                    help="шаг параметра размера x в таблице ядер [0.1]")
+    p.add_argument("--no-jit", action="store_true",
+                   help="отключить numba-бэкенд miepython: таблицы Mie-ядер "
+                        "считаются чистым Python и работают заметно медленнее "
+                        "(по умолчанию JIT включён, если доступен numba)")
     p.add_argument("--quad-order", type=int, default=24,
                    help="порядок Гаусса–Лежандра на подсегменте [24]")
     p.add_argument("--log-span", type=float, default=0.1,
@@ -581,6 +585,9 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None) -> None:
     args = parse_args(argv)
+
+    if args.no_jit:
+        set_mie_jit(False)
 
     degrees = sorted(set(args.degree))
     if any(k < 1 or k > 4 for k in degrees):
@@ -639,6 +646,7 @@ def main(argv=None) -> None:
         print(f"  m = {mv.real:.3f}{mv.imag:+.3f}j")
 
     print(f"строим таблицы ядер Mie ({len(m_grid)} значений m, miepython)...")
+    print(f"  Mie-бэкенд: {'numba (JIT)' if mie_jit_enabled() else 'чистый Python'}")
     tables: dict = {}
     for mv in m_grid:
         tables[mv] = KernelTable(mv, channels, args.r0_min, args.r1_max,

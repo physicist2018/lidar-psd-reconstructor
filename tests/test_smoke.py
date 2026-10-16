@@ -352,6 +352,39 @@ def test_weights_change_result() -> None:
     assert e_rel <= e_abs + 1e-12
 
 
+def test_quadrature_grid_cached_equal() -> None:
+    """quadrature_grid кэшируется: повторные вызовы дают те же узлы/веса,
+    но независимые копии (изменение результата не портит кэш)."""
+    from solve.basis import quadrature_grid
+
+    breaks = np.array([0.02, 0.1, 1.0, 10.0])
+    r1, w1 = quadrature_grid(breaks, order=12, max_log_span=0.2)
+    r2, w2 = quadrature_grid(breaks, order=12, max_log_span=0.2)
+    assert np.array_equal(r1, r2) and np.array_equal(w1, w2)
+    r1[0] += 1.0  # мутация копии не должна влиять на кэш
+    r3, w3 = quadrature_grid(breaks, order=12, max_log_span=0.2)
+    assert r3[0] != r1[0]
+    assert np.array_equal(r3, r2) and np.array_equal(w3, w2)
+    # другой порядок/шаг — другой ключ кэша, вызов должен работать
+    quadrature_grid(breaks, order=24, max_log_span=0.2)
+
+
+def test_mie_jit_toggle_identical() -> None:
+    """Бэкенд miepython переключается в рантайме, результат не меняется."""
+    from solve.kernels import set_mie_jit
+
+    r = np.geomspace(0.05, 5.0, 60)
+    ch = Channel("beta", 0.355)
+    m = 1.45 - 0.005j
+    set_mie_jit(True)
+    k_jit = ch.kernel(m, r)
+    assert set_mie_jit(False)
+    k_py = ch.kernel(m, r)
+    assert set_mie_jit(True)  # восстановить быстрый бэкенд
+    # JIT и чистый Python дают одно и то же ядро (различие ~1e-14)
+    assert np.allclose(k_jit, k_py, rtol=1e-6)
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

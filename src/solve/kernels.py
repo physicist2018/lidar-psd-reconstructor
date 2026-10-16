@@ -20,12 +20,52 @@ qback = |sum_n (2n+1) (-1)^n (a_n - b_n)|^2 / x^2 = 4 |S(pi)|^2 / x^2,
 
 from __future__ import annotations
 
+import importlib.util
+import os
+
 import numpy as np
-import miepython as mie
 from scipy.interpolate import CubicSpline
+
+# numba-бэкенд miepython ускоряет расчёт таблиц Mie-ядер примерно в 45 раз
+# (замеры: ~26 с → ~0.55 с на демонстрационном наборе). В miepython 3.x он
+# выключен по умолчанию и включается переменной MIEPYTHON_USE_JIT, которая
+# читается при импорте miepython, — поэтому выставляем её ДО `import miepython`.
+# Если numba недоступен (например, Emscripten), остаётся чистый Python.
+if importlib.util.find_spec("numba") is not None:
+    os.environ.setdefault("MIEPYTHON_USE_JIT", "1")
+
+import miepython as mie
 
 # (1 мкм)^2 = 1e-12 м^2 — перевод сечения из мкм^2 в м^2
 UM2_TO_M2 = 1e-12
+
+
+def set_mie_jit(use_jit: bool) -> bool:
+    """Переключить Mie-бэкенд miepython в рантайме.
+
+    ``use_jit=True`` — numba-бэкенд (быстрый, используется по умолчанию,
+    если numba доступен); ``use_jit=False`` — чистый Python (флаг ``--no-jit``).
+
+    Возвращает True, если запрошенный режим применён (False — numba недоступен
+    при ``use_jit=True``). Переключается ``single_sphere`` в ``miepython.core``:
+    именно её вызывает ``efficiencies_mx``, а через неё — ``Channel.kernel``.
+    """
+    from miepython import core as mie_core
+    if use_jit:
+        try:
+            from miepython.mie_jit import _single_sphere_nb as impl
+        except ImportError:  # numba недоступен
+            return False
+    else:
+        from miepython.mie_nojit import _single_sphere_py as impl
+    mie_core.single_sphere = impl
+    return True
+
+
+def mie_jit_enabled() -> bool:
+    """Включён ли в данный момент numba-бэкенд miepython."""
+    from miepython import core as mie_core
+    return getattr(mie_core.single_sphere, "__module__", "").endswith("mie_jit")
 
 
 def dvol_dlnr_factor(r) -> np.ndarray:
@@ -56,7 +96,11 @@ class Channel:
         return f"{prefix}({self.wl_um * 1e3:g} nm)"
 
     def kernel(self, m: complex, r) -> np.ndarray:
-        """Физическое ядро на частицу: alpha — [м^2], beta — [м^2/ср]."""
+        """Физическое ядро на частицу: alpha — [м^2], beta — [м^2/ср].
+
+        Скорость определяется бэкендом miepython: с numba (по умолчанию —
+        см. ``set_mie_jit``) примерно в 45 раз быстрее, чем на чистом Python.
+        """
         r = np.asarray(r, dtype=float)
         x = 2.0 * np.pi * r / self.wl_um
         qext, _qsca, qback, _g = mie.efficiencies_mx(m, x)

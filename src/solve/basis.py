@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import numpy as np
 from scipy.interpolate import BSpline
 
@@ -49,13 +51,23 @@ def bspline_basis(r0: float, r1: float, degree: int, n_basis: int,
     return basis, knots
 
 
+@lru_cache(maxsize=None)
+def _leggauss(order: int):
+    """Узлы и веса Гаусса–Лежандра порядка ``order`` на [-1, 1] (кэш).
+
+    ``np.polynomial.legendre.leggauss`` решает задачу на собственные значения,
+    поэтому результат кэшируется: при переборе окон порядок повторяется.
+    """
+    return np.polynomial.legendre.leggauss(order)
+
+
 def _gl_nodes(a: float, b: float, order: int):
     """Узлы и веса Гаусса–Лежандра порядка ``order`` на отрезке [a, b]."""
-    x, w = np.polynomial.legendre.leggauss(order)
+    x, w = _leggauss(order)
     return 0.5 * (b - a) * x + 0.5 * (a + b), 0.5 * (b - a) * w
 
 
-def quadrature_grid(breaks: np.ndarray, order: int = 24, max_log_span: float = 0.1):
+def quadrature_grid(breaks, order: int = 24, max_log_span: float = 0.1):
     """Составная квадратура Гаусса–Лежандра на [breaks[0], breaks[-1]].
 
     Отрезок разбивается в точках ``breaks`` (узлы сплайнового базиса),
@@ -63,10 +75,23 @@ def quadrature_grid(breaks: np.ndarray, order: int = 24, max_log_span: float = 0
     равномерные подсегменты шириной не больше ``max_log_span``, чтобы
     разрешить осциллирующие ядра Mie.
 
-    Возвращает (узлы, веса).
+    Результат кэшируется по тройке (сетка ``breaks``, ``order``,
+    ``max_log_span``): одни и те же узлы повторяются для всех показателей
+    преломления ``m`` и всех ядер, поэтому строить их заново нет смысла.
+
+    Возвращает (узлы, веса) — свежие массивы (копии кэшированных).
     """
+    key = tuple(np.asarray(breaks, dtype=float).tolist())
+    nodes, weights = _quadrature_grid(key, order, max_log_span)
+    return nodes.copy(), weights.copy()
+
+
+@lru_cache(maxsize=None)
+def _quadrature_grid(breaks: tuple, order: int, max_log_span: float):
+    """Ядро ``quadrature_grid``: узлы и веса для конкретного разбиения."""
+    breaks_arr = np.asarray(breaks, dtype=float)
     nodes, weights = [], []
-    for a, b in zip(breaks[:-1], breaks[1:]):
+    for a, b in zip(breaks_arr[:-1], breaks_arr[1:]):
         n_seg = max(1, int(np.ceil(np.log(b / a) / max_log_span)))
         log_bounds = np.linspace(np.log(a), np.log(b), n_seg + 1)
         for u, v in zip(log_bounds[:-1], log_bounds[1:]):
