@@ -2,8 +2,9 @@
 из лидарных коэффициентов (обратное рассеяние и ослабление).
 
 Единицы входных данных: β — 1/(м·ср), α — 1/м (ядра приводятся к м²/м²·ср).
-Восстанавливается F(r) = dV/dln r (мкм³/м³, объём частиц на логарифми-
-ческий интервал радиуса); дополнительно выводятся интегральные
+Восстанавливается F(r) = dV/dln r (объём частиц на логарифмический
+интервал радиуса); в выводе объёмные величины приводятся к мкм³/см³,
+числовая концентрация N — к см⁻³. Дополнительно выводятся интегральные
 характеристики (N, C_v, ⟨V⟩, r_eff) и параметры логнормальных мод
 (Vf, rm_f, σf, Vc, rm_c, σc и общие V, rm, σ).
 
@@ -154,20 +155,31 @@ def forward_measurements(channels, kernels: KernelTable, n_func, r_min, r_max,
 # ----------------------------------------------------------------------
 
 UM3_TO_M3 = 1e-18  # (1 мкм)^3 = 1e-18 м^3
+CM3_PER_M3 = 1e6   # 1 м³ = 1e6 см³
+
+
+def _per_cm3(v):
+    """Привести объёмную/числовую величину «на м³» к «на см³» (v / 1e6).
+
+    Работает и со скалярами, и с массивами numpy. Внутренние вычисления
+    ведутся в единицах «на м³», к см³ приводится только вывод.
+    """
+    return v / CM3_PER_M3
 
 
 def size_moments(n_avg, r_grid) -> dict:
     """Интегральные характеристики восстановленного объёмного распределения
-    F(r) = dV/dln r (мкм³/м³), r в мкм.
+    F(r) = dV/dln r (внутри — в мкм³/м³), r в мкм.
 
     Точки вне покрытия лучших решений (F = NaN) дают нулевой вклад;
     диапазон покрытия и его доля возвращаются в ``r_cov_min``,
     ``r_cov_max``, ``cov_frac``. Отрицательные артефакты восстановления
     отбрасываются (по физическому смыслу F ≥ 0).
 
-    Оценки (n(r) = q(r)·F(r), q = 3/(4π r⁴)):
-      N         — числовая концентрация, м⁻³;
-      vol_conc  — объёмная концентрация V = ∫F dln r, мкм³/м³;
+    Оценки (n(r) = q(r)·F(r), q = 3/(4π r⁴)); объёмные и числовые величины
+    возвращаются в расчёте на см³:
+      N         — числовая концентрация, см⁻³;
+      vol_conc  — объёмная концентрация V = ∫F dln r, мкм³/см³;
       vol_mean  — средний объём частицы, мкм³;
       r_eff     — эффективный радиус, мкм.
     """
@@ -191,9 +203,9 @@ def size_moments(n_avg, r_grid) -> dict:
     r_cov_max = float(r_cov.max()) if r_cov.size else np.nan
 
     return {
-        "N_m-3": float(n_num),
+        "N_cm-3": float(_per_cm3(n_num)),
         "vol_mean_um3": float(vol_mean),
-        "vol_conc_um3_per_m3": float(v_conc),
+        "vol_conc_um3_per_cm3": float(_per_cm3(v_conc)),
         "r_eff_um": float(r_eff),
         "r_cov_min_um": r_cov_min,
         "r_cov_max_um": r_cov_max,
@@ -206,8 +218,8 @@ def _print_moments(mom: dict) -> None:
     print(f"  покрытый диапазон радиусов: {mom['r_cov_min_um']:.4g}–"
           f"{mom['r_cov_max_um']:.4g} мкм (доля сетки: {mom['cov_frac'] * 100:.0f}%)")
     v_m3 = mom["vol_mean_um3"] * UM3_TO_M3
-    print(f"  числовая концентрация N      = {mom['N_m-3']:.4g} м⁻³")
-    print(f"  объёмная концентрация C_v    = {mom['vol_conc_um3_per_m3']:.4g} мкм³/м³")
+    print(f"  числовая концентрация N      = {mom['N_cm-3']:.4g} см⁻³")
+    print(f"  объёмная концентрация C_v    = {mom['vol_conc_um3_per_cm3']:.4g} мкм³/см³")
     print(f"  средний объём частиц ⟨V⟩    = {mom['vol_mean_um3']:.4g} мкм³ "
           f"({v_m3:.4g} м³)")
     print(f"  эффективный радиус r_eff      = {mom['r_eff_um']:.4g} мкм")
@@ -258,7 +270,8 @@ def mode_analysis(r_grid, f_avg, r_split: float = 0.5,
     overall — весь покрытый диапазон.
 
     Для каждого диапазона:
-      V — интеграл F по ln r (мкм³/м³);
+      V — интеграл F по ln r (внутренние единицы мкм³/м³; при выводе
+          переводится в мкм³/см³);
       rm, sigma — из взвешенного МНК-фита логнормали в координатах
       (ln r, ln F) (точки с F ≤ 0 исключены, веса — покрытие). Если фит
       вырождается (например, суммарное бимодальное распределение не
@@ -322,12 +335,12 @@ def mode_analysis(r_grid, f_avg, r_split: float = 0.5,
 def _print_modes(modes: dict, r_split: float) -> None:
     print("\n=== Параметры логнормальных мод (dV/dln r) ===")
     print(f"  граница раздела мод: {r_split:g} мкм (--r-split)")
-    print(f"  {'мода':<8} {'V, мкм³/м³':>12} {'rm, мкм':>9} {'sigma':>7}   примечание")
+    print(f"  {'мода':<8} {'V, мкм³/см³':>12} {'rm, мкм':>9} {'sigma':>7}   примечание")
     for name in ("fine", "coarse", "overall"):
         v, rm, sg, ok, method = modes[name]
         if ok:
             note = "" if method == "fit" else f"({method})"
-            print(f"  {name:<8} {v:>12.4g} {rm:>9.4g} {sg:>7.4g}   {note}")
+            print(f"  {name:<8} {float(_per_cm3(v)):>12.4g} {rm:>9.4g} {sg:>7.4g}   {note}")
         else:
             print(f"  {name:<8} {'—':>12} {'—':>9} {'—':>7}   {method}")
 
@@ -341,7 +354,8 @@ def lognormal_volume(r, V: float, r_g: float, sigma: float) -> np.ndarray:
 
     F(r) = V exp(-(ln(r/r_g))^2 / (2 ln^2 sigma)) / (sqrt(2 pi) ln sigma),
 
-    V — интеграл по ln r (объёмная концентрация моды, мкм³/м³),
+    V — интеграл по ln r (объёмная концентрация моды; внутренние единицы
+    построения — мкм³/м³, в выводе — мкм³/см³),
     r_g — медианный (модальный) радиус, sigma — геометрическое СКО.
     """
     r = np.asarray(r, float)
@@ -391,6 +405,12 @@ def plot_results(out_path: str, *, r_grid, n_true, n_avg, n_avg_raw, n_best,
         print(f"[предупреждение] matplotlib недоступен: {exc}")
         return False
 
+    # объёмное распределение выводится в мкм³/см³
+    n_avg = _per_cm3(n_avg)
+    n_best = _per_cm3(n_best)
+    n_true = None if n_true is None else _per_cm3(n_true)
+    n_avg_raw = None if n_avg_raw is None else _per_cm3(n_avg_raw)
+
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5.2))
     if n_true is not None:
         ax1.semilogx(r_grid, n_true, "k--", lw=1.6, label="истинное n(r)")
@@ -401,7 +421,7 @@ def plot_results(out_path: str, *, r_grid, n_true, n_avg, n_avg_raw, n_best,
                      label="среднее (несглаженное)")
     ax1.semilogx(r_grid, n_avg, "C0-", lw=2.6, label="среднее по лучшим")
     ax1.set_xlabel("r, мкм")
-    ax1.set_ylabel("dV/dln r, мкм³/м³")
+    ax1.set_ylabel("dV/dln r, мкм³/см³")
     ax1.set_title(f"Объёмное распределение частиц по размерам, "
                   f"⟨m⟩ = {m_avg.real:.3f}{m_avg.imag:+.3f}j")
     ax1.grid(True, which="both", ls=":", alpha=0.5)
@@ -440,7 +460,7 @@ def _json_payload(r_grid, n_avg, n_best, solutions, channels, g1, g_fit,
             for j, ch in enumerate(channels)
         ],
         "r_um": r_grid.tolist(),
-        "n_avg": [None if not np.isfinite(v) else float(v) for v in n_avg],
+        "n_avg": [None if not np.isfinite(v) else float(_per_cm3(v)) for v in n_avg],
         "best_solutions": [
             {"rank": t + 1, "m_real": s.m.real, "m_imag": s.m.imag,
              "degree": s.degree, "r0": s.r0, "r1": s.r1,
@@ -449,12 +469,12 @@ def _json_payload(r_grid, n_avg, n_best, solutions, channels, g1, g_fit,
         ],
     }
     if n_avg_raw is not None:
-        payload["n_avg_raw"] = [None if not np.isfinite(v) else float(v)
+        payload["n_avg_raw"] = [None if not np.isfinite(v) else float(_per_cm3(v))
                                 for v in n_avg_raw]
     if modes is not None:
         payload["modes"] = {
             k: {
-                "V_um3_per_m3": None if not np.isfinite(v[0]) else float(v[0]),
+                "V_um3_per_cm3": None if not np.isfinite(v[0]) else float(_per_cm3(v[0])),
                 "rm_um": None if not np.isfinite(v[1]) else float(v[1]),
                 "sigma": None if not np.isfinite(v[2]) else float(v[2]),
                 "ok": bool(v[3]),
@@ -490,7 +510,7 @@ def _print_summary(args, solutions, g1, channels, n_avg, g_fit, r_grid,
         if not np.isfinite(n_avg[i]):
             print(f"  r = {r:9.4g} мкм,  dV/dln r = нет покрытия (вне окон лучших решений)")
             continue
-        print(f"  r = {r:9.4g} мкм,  dV/dln r = {n_avg[i]:.4g} мкм³/м³")
+        print(f"  r = {r:9.4g} мкм,  dV/dln r = {float(_per_cm3(n_avg[i])):.4g} мкм³/см³")
 
     print("\n=== Согласие по каналам (среднее решение) ===")
     for j, ch in enumerate(channels):

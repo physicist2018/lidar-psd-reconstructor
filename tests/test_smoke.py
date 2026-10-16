@@ -171,19 +171,19 @@ def test_size_moments_physical() -> None:
     from solve import size_moments
 
     r = np.geomspace(0.02, 5.0, 300)
-    f = demo_true_distribution(r)  # dV/dln r, мкм³/м³
+    f = demo_true_distribution(r)  # dV/dln r (внутренние единицы, мкм³/м³)
     mom = size_moments(f, r)
-    assert mom["N_m-3"] > 0
+    assert mom["N_cm-3"] > 0
     assert mom["vol_mean_um3"] > 0
-    assert mom["vol_conc_um3_per_m3"] > 0
-    assert abs(mom["vol_conc_um3_per_m3"] - 1e8) < 1e6  # Vf+Vc = 1e8 мкм³/м³
+    assert mom["vol_conc_um3_per_cm3"] > 0
+    assert abs(mom["vol_conc_um3_per_cm3"] - 100.0) < 1.0  # Vf+Vc = 100 мкм³/см³
     assert 0.2 < mom["r_eff_um"] < 0.4  # моды 0.15/1.0 мкм, r_eff ~ 0.28
     assert mom["cov_frac"] == 1.0
     # отрицательные артефакты отбрасываются: моменты не отрицательны
     f2 = f.copy()
     f2[::5] = -f2[::5]
     mom2 = size_moments(f2, r)
-    assert mom2["N_m-3"] >= 0 and mom2["r_eff_um"] >= 0
+    assert mom2["N_cm-3"] >= 0 and mom2["r_eff_um"] >= 0
 
 
 def test_configurable_n_basis() -> None:
