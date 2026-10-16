@@ -133,11 +133,15 @@ def scan_variants(channels, kernels_map: dict, g1: np.ndarray, degrees,
                   gamma_select: str = "fixed",
                   gamma_rel_fixed: float | None = None,
                   zero_boundary: bool = True,
+                  n_basis: int | None = None,
                   order: int = 24, max_log_span: float = 0.1):
     """Перебор (показатель преломления m, r0, r1, степень) с выбором gamma.
 
     ``kernels_map`` — словарь {m: KernelTable} (таблицы ядер для каждого m
     из сетки перебора).
+
+    ``n_basis`` — число базисных функций на окно; при ``None`` берется
+    число каналов ``len(channels)``.
 
     ``zero_boundary`` — при True из разложения исключаются крайние базисные
     функции: каждое решение удовлетворяет n(r0) = n(r1) = 0 (однородные
@@ -166,8 +170,26 @@ def scan_variants(channels, kernels_map: dict, g1: np.ndarray, degrees,
         weights = 1.0 / g1n if relative else np.ones_like(g1n)
     gamma_rel = 10.0 ** np.linspace(gamma_exp_min, gamma_exp_max, n_gamma)
 
+    if not degrees:
+        raise ValueError("список степеней пуст")
+    if n_basis is None:
+        n_basis = len(channels)
+    degree_max = max(degrees)
+    if n_basis < degree_max + 1:
+        raise ValueError(
+            f"n_basis ({n_basis}) < max(степень)+1 ({degree_max + 1}): "
+            f"уменьшите --degree или увеличьте --n-basis")
+    if zero_boundary and n_basis < 3:
+        raise ValueError("при нулевых граничных условиях нужно n_basis >= 3")
+    n_unknown = n_basis - (2 if zero_boundary else 0)
+    if n_unknown > len(channels):
+        import warnings
+        warnings.warn(
+            f"неизвестных на окно ({n_unknown}) больше измерений ({len(channels)}): "
+            f"решение опирается главным образом на регуляризацию "
+            f"(система недоопределена)", stacklevel=2)
+
     solutions: list[Solution] = []
-    n_basis = len(channels)
     for m, kernels in kernels_map.items():
         for degree in degrees:
             for r0 in r0_grid:

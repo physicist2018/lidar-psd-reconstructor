@@ -363,6 +363,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "без него запускается демонстрация на синтетических данных")
     p.add_argument("--degree", nargs="+", type=int, default=[1, 2, 3, 4],
                    help="степени B-сплайнов (1..4) [по умолчанию: 1 2 3 4]")
+    p.add_argument("--n-basis", metavar="N", type=int, default=None,
+                   help="число базисных функций на окно; по умолчанию — число каналов [авто]")
     p.add_argument("--r0-min", type=float, default=0.02, help="нижняя граница окна, мкм [0.02]")
     p.add_argument("--r0-max", type=float, default=0.5, help="верхняя граница нижних границ окна, мкм [0.5]")
     p.add_argument("--nr0", type=int, default=6, help="число значений r0 (лог. сетка) [6]")
@@ -443,6 +445,11 @@ def main(argv=None) -> None:
     print("входные единицы: β [1/(м·ср)], α [1/м]")
     bc = "выключено (--no-zero-boundary)" if args.no_zero_boundary else "включено"
     print(f"граничные условия n(r0)=n(r1)=0 (каждое элементарное решение): {bc}")
+    nb = args.n_basis if args.n_basis is not None else len(channels)
+    if not args.no_zero_boundary:
+        print(f"базисных функций на окно: {nb} (с ГУ неизвестных: {nb - 2})")
+    else:
+        print(f"базисных функций на окно: {nb}")
     print(f"показатель преломления m (исходный/истинный) = {m.real:g} {m.imag:+g}j")
 
     # ---- сетка показателя преломления для перебора ----
@@ -488,19 +495,23 @@ def main(argv=None) -> None:
     r1_grid = np.geomspace(args.r1_min, args.r1_max, args.nr1)
 
     print("перебор (m, r0, r1, степень)...")
-    solutions, _scale = scan_variants(
-        channels, tables, g1, degrees, r0_grid, r1_grid,
-        min_ratio=args.min_ratio,
-        gamma_exp_min=args.gamma_min, gamma_exp_max=args.gamma_max,
-        n_gamma=args.ngamma,
-        weights=None,
-        nonneg=args.nonneg,
-        relative=not args.absolute,
-        gamma_select=args.gamma_select,
-        gamma_rel_fixed=args.gamma_rel if args.gamma_select == "fixed" else None,
-        zero_boundary=not args.no_zero_boundary,
-        order=args.quad_order, max_log_span=args.log_span,
-    )
+    try:
+        solutions, _scale = scan_variants(
+            channels, tables, g1, degrees, r0_grid, r1_grid,
+            min_ratio=args.min_ratio,
+            gamma_exp_min=args.gamma_min, gamma_exp_max=args.gamma_max,
+            n_gamma=args.ngamma,
+            weights=None,
+            nonneg=args.nonneg,
+            relative=not args.absolute,
+            gamma_select=args.gamma_select,
+            gamma_rel_fixed=args.gamma_rel if args.gamma_select == "fixed" else None,
+            zero_boundary=not args.no_zero_boundary,
+            n_basis=args.n_basis,
+            order=args.quad_order, max_log_span=args.log_span,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"ошибка: {exc}") from None
     if not solutions:
         raise SystemExit("нет ни одного допустимого окна [r0, r1] — "
                          "проверьте границы и min-ratio")

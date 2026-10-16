@@ -183,6 +183,48 @@ def test_size_moments_physical() -> None:
     assert mom2["N_m-3"] >= 0 and mom2["r_eff_um"] >= 0
 
 
+def test_configurable_n_basis() -> None:
+    """Число базисных функций настраивается; валидация ограничений."""
+    import warnings
+
+    channels = make_channels()
+    kern = KernelTable(M, channels, 0.05, 5.0, dx_max=0.1)
+    g1 = forward_measurements(channels, kern, demo_true_distribution, 0.05, 5.0)
+    r0g = np.geomspace(0.05, 0.3, 2)
+    r1g = np.geomspace(2.0, 5.0, 2)
+    common = dict(min_ratio=4.0, gamma_select="fixed", gamma_rel_fixed=0.1,
+                  n_gamma=5, order=12, max_log_span=0.2)
+
+    # по умолчанию: n_basis = число каналов (5); с ГУ длина C = 3
+    sols, _ = scan_variants(channels, {M: kern}, g1, [2], r0g, r1g, **common)
+    assert all(len(s.C) == 3 for s in sols)
+
+    # явное n_basis=7: с ГУ длина C = 5; без ГУ: 7
+    sols7, _ = scan_variants(channels, {M: kern}, g1, [2], r0g, r1g,
+                             n_basis=7, **common)
+    assert sols7 and all(len(s.C) == 5 for s in sols7)
+    sols4, _ = scan_variants(channels, {M: kern}, g1, [2], r0g, r1g,
+                             n_basis=4, zero_boundary=False, **common)
+    assert sols4 and all(len(s.C) == 4 for s in sols4)
+
+    # валидация: невозможные конфигурации -> ValueError
+    def expect_error(**kw) -> None:
+        try:
+            scan_variants(channels, {M: kern}, g1, [2], r0g, r1g, **common, **kw)
+        except ValueError:
+            return
+        raise AssertionError(f"ожидалась ошибка: {kw}")
+
+    expect_error(n_basis=2)                    # < степень+1 = 3
+    expect_error(n_basis=2, zero_boundary=True)  # ГУ требуют n_basis >= 3
+
+    # предупреждение о недоопределённости (неизвестных > измерений)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        scan_variants(channels, {M: kern}, g1, [2], r0g, r1g, n_basis=8, **common)
+        assert any("недоопределен" in str(x.message) for x in w)
+
+
 def test_weights_change_result() -> None:
     """Веса 1/g1 (относительные) меняют решение переопределённой системы."""
     rng = np.random.default_rng(0)
