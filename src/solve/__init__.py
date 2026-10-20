@@ -262,7 +262,7 @@ def _fit_lognormal_ln(x, y, w=None):
 
 
 def mode_analysis(r_grid, f_avg, r_split: float = 0.5,
-                  w=None) -> dict:
+                  w=None, method: str = "auto") -> dict:
     """Логнормальный анализ мод объёмного распределения F = dV/dln r.
 
     fine — по покрытой области r ∈ [r_cov_min, r_split];
@@ -272,11 +272,15 @@ def mode_analysis(r_grid, f_avg, r_split: float = 0.5,
     Для каждого диапазона:
       V — интеграл F по ln r (внутренние единицы мкм³/м³; при выводе
           переводится в мкм³/см³);
-      rm, sigma — из взвешенного МНК-фита логнормали в координатах
-      (ln r, ln F) (точки с F ≤ 0 исключены, веса — покрытие). Если фит
-      вырождается (например, суммарное бимодальное распределение не
-      аппроксимируется одной логнормалью), rm и sigma оцениваются по
-      объёмным моментам: rm = exp⟨ln r⟩_V, sigma = exp(СКО ln r)_V.
+      rm, sigma — либо из взвешенного МНК-фита логнормали в координатах
+      (ln r, ln F) (точки с F ≤ 0 исключены, веса — покрытие), либо из
+      статистической (моментной) оценки rm = exp⟨ln r⟩_V,
+      sigma = exp(СКО ln r)_V.
+
+    method — способ расчёта rm и sigma:
+      "auto" — фит логнормалью, при вырождении фита — моменты (по умолчанию);
+      "fit"  — только фит (при неудаче — моменты);
+      "stat" — только статистическая (моментная) оценка, без фита.
 
     Возвращает словарь с ключами fine/coarse/overall; каждая запись —
     (V, rm, sigma, ok, method), где ok=False означает, что данных
@@ -308,13 +312,14 @@ def mode_analysis(r_grid, f_avg, r_split: float = 0.5,
         pos = f_sel > 0
         if pos.sum() < 3:
             return v, float("nan"), float("nan"), False, "мало точек с F > 0"
-        wts = None if wv is None else wv[mask][pos]
-        v_f, rm, sg = _fit_lognormal_ln(np.log(r_sel[pos]),
-                                        np.log(f_sel[pos]), wts)
-        if np.isfinite(v_f) and v_f > 0 and np.isfinite(rm):
-            return v, rm, sg, True, "fit"
-        # моментная оценка (эквивалентная логнормаль по объёмным моментам)
         x = np.log(r_sel[pos])
+        if method != "stat":
+            wts = None if wv is None else wv[mask][pos]
+            v_f, rm, sg = _fit_lognormal_ln(x, np.log(f_sel[pos]), wts)
+            if np.isfinite(v_f) and v_f > 0 and np.isfinite(rm):
+                return v, rm, sg, True, "fit"
+        # статистическая (моментная) оценка: эквивалентная логнормаль
+        # по объёмным моментам: rm = exp⟨ln r⟩_V, sigma = exp(СКО ln r)_V
         wts_f = np.asarray(f_sel[pos], dtype=float)
         wsum = float(np.sum(wts_f))
         mu = float(np.sum(wts_f * x) / wsum)
@@ -332,9 +337,10 @@ def mode_analysis(r_grid, f_avg, r_split: float = 0.5,
     }
 
 
-def _print_modes(modes: dict, r_split: float) -> None:
+def _print_modes(modes: dict, r_split: float, method: str = "auto") -> None:
     print("\n=== Параметры логнормальных мод (dV/dln r) ===")
     print(f"  граница раздела мод: {r_split:g} мкм (--r-split)")
+    print(f"  способ расчёта параметров: {method} (--modes)")
     print(f"  {'мода':<8} {'V, мкм³/см³':>12} {'rm, мкм':>9} {'sigma':>7}   примечание")
     for name in ("fine", "coarse", "overall"):
         v, rm, sg, ok, method = modes[name]
@@ -579,6 +585,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "(нормированная шкала, безразмерный) [1e-4]")
     p.add_argument("--r-split", type=float, default=0.5,
                    help="граница разделения fine/coarse мод для анализа, мкм [0.5]")
+    p.add_argument("--modes", choices=["fit", "stat", "auto"], default="auto",
+                   help="способ расчёта параметров мод (fine/coarse/overall): "
+                        "fit — фит логнормалью, stat — статистическая "
+                        "(моментная) оценка, auto — фит, при неудаче моменты [auto]")
     p.add_argument("--absolute", action="store_true",
                    help="МНК по абсолютным невязкам (по умолчанию веса 1/g1)")
     p.add_argument("--dx-max", type=float, default=0.1,
@@ -755,8 +765,9 @@ def main(argv=None) -> None:
     count = np.zeros(r_grid.size)
     for s in g_best:
         count += (r_grid >= s.r0) & (r_grid <= s.r1)
-    modes = mode_analysis(r_grid, n_avg, r_split=args.r_split, w=count)
-    _print_modes(modes, args.r_split)
+    modes = mode_analysis(r_grid, n_avg, r_split=args.r_split, w=count,
+                          method=args.modes)
+    _print_modes(modes, args.r_split, method=args.modes)
 
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:

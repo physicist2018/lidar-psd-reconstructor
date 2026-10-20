@@ -194,7 +194,8 @@ def _solve_profile(args, channels, tables, g1):
     count = np.zeros(r_grid.size)
     for s in g_best:
         count += (r_grid >= s.r0) & (r_grid <= s.r1)
-    modes = mode_analysis(r_grid, n_avg, r_split=args.r_split, w=count)
+    modes = mode_analysis(r_grid, n_avg, r_split=args.r_split, w=count,
+                          method=args.modes)
 
     return {
         "r_grid": r_grid, "n_avg": n_avg, "n_avg_raw": n_avg_raw,
