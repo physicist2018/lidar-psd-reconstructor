@@ -605,6 +605,16 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Re(m) истинного распределения для демо [1.45]")
     p.add_argument("--m-imag", type=float, default=-0.005,
                    help="Im(m) истинного распределения для демо [-0.005]")
+    p.add_argument("--lidar-ratio-cons", action="store_true",
+                   help="ограничить плавность лидарного отношения S = α/β с высотой: "
+                        "переранжирование решений по отклонению от сглаженного по "
+                        "высотам опорного профиля S (только в --batch) [выкл.]")
+    p.add_argument("--lidar-ratio-w", type=float, default=0.5,
+                   help="вес штрафа за отклонение лидарного отношения от опорного "
+                        "профиля в ранге решений (score = Err + w·Δln S) [0.5]")
+    p.add_argument("--lidar-ratio-iter", type=int, default=3,
+                   help="макс. число итераций уточнения опорного профиля лидарного "
+                        "отношения [3]")
     p.add_argument("--m-reals", nargs="+", type=float, default=None,
                    help="сетка Re(m) для перебора [демо: 1.40 1.45 1.50; данные: сетка вокруг m из файла]")
     p.add_argument("--m-imags", nargs="+", type=float, default=None,
@@ -622,6 +632,14 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None) -> None:
     args = parse_args(argv)
+
+    if args.lidar_ratio_w < 0:
+        raise SystemExit("ошибка: --lidar-ratio-w должен быть >= 0")
+    if args.lidar_ratio_iter < 1:
+        raise SystemExit("ошибка: --lidar-ratio-iter должен быть >= 1")
+    if args.lidar_ratio_cons and args.batch is None:
+        print("[предупреждение] --lidar-ratio-cons действует только в пакетном "
+              "режиме (--batch); игнорируется")
 
     if args.no_jit:
         set_mie_jit(False)

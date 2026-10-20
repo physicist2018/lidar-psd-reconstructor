@@ -27,6 +27,13 @@
        refractive.txt   — показатель преломления по каждой высоте;
        errors.txt       — относительные ошибки восстановления по каналам;
        plot_<H>.png     — график распределения и согласия по каждому каналу.
+
+Опциональное ограничение (--lidar-ratio-cons): восстановленное лидарное
+отношение S = α/β по общим длинам волн каналов не должно сильно варьировать
+с высотой. Ранжирование решений каждой высоты дополняется штрафом за
+отклонение S от опорного профиля — сглаженной по высотам оценки S
+(при --lidar-ratio-cons создаётся файл lidar_ratios.txt). По умолчанию
+ограничение выключено.
 """
 
 from __future__ import annotations
@@ -135,21 +142,177 @@ def _build_kernel_tables(args, channels, m_grid):
     return solve_channels, tables
 
 
-def _solve_profile(args, channels, tables, g1):
-    """Весь цикл решения для одной высоты: перебор → ансамбль → моменты.
+def _common_lidar_wavelengths(channels):
+    """Общие длины волн каналов β и α.
 
-    Использует уже построенные таблицы ядер (``tables`` переиспользуются).
-    Возвращает dict со всеми результатами профиля (см. ``_write_profile``).
+    Возвращает список ``(wl_um, idx_beta, idx_alpha)`` — индексы каналов,
+    у которых есть и обратное рассеяние, и ослабление на одной длине волны
+    (по ним определяется лидарное отношение S = α/β). Индексы соответствуют
+    порядку каналов пакета (совпадает с порядком ``g_fit`` решений).
     """
-    from . import mode_analysis, size_moments  # избегаем циклического импорта
+    beta = {ch.wl_um: j for j, ch in enumerate(channels) if ch.kind == "beta"}
+    alpha = {ch.wl_um: j for j, ch in enumerate(channels) if ch.kind == "alpha"}
+    return [(wl, beta[wl], alpha[wl]) for wl in sorted(set(beta) & set(alpha))]
 
+
+def _lidar_ratio(g_fit, common) -> np.ndarray:
+    """Лидарное отношение S = α/β восстановленных коэффициентов по общим λ.
+
+    ``g_fit`` — рассчитанные коэффициенты (``Solution.g_fit`` или
+    ``prof['g_fit']``) в порядке каналов пакета. Если α ≤ 0 или β ≤ 0 —
+    отношение NaN (недопустимое).
+    """
+    out = np.empty(len(common))
+    for j, (_wl, ib, ia) in enumerate(common):
+        b, a = float(g_fit[ib]), float(g_fit[ia])
+        out[j] = a / b if (b > 0 and a > 0) else np.nan
+    return out
+
+
+LIDAR_REF_LAM = 1.0  # сглаживание опорного профиля S (нормированная шкала высоты)
+
+
+def _windowed_median_ref(S: np.ndarray) -> np.ndarray:
+    """Скользящая медиана матрицы S (n_alt × n_λ) по высоте.
+
+    Окно — соседняя высота слева и справа (ширина 3, у краёв сужается).
+    NaN-устойчива (np.nanmedian по столбцам окна).
+    """
+    S = np.asarray(S, dtype=float)
+    n_alt = S.shape[0]
+    out = np.full_like(S, np.nan)
+    for h in range(n_alt):
+        lo, hi = max(0, h - 1), min(n_alt, h + 2)
+        out[h] = np.nanmedian(S[lo:hi], axis=0)
+    return out
+
+
+def _smooth_ref_profile(altitudes, S: np.ndarray) -> np.ndarray:
+    """Опорный профиль S_ref(h, λ): сглаживание оценки S по высоте.
+
+    При >= 5 высот — кубический сглаживающий сплайн по нормированной высоте
+    (NaN-точки исключаются, при неудаче — скользящая медиана); при меньшем
+    числе высот или неположительной шкале — скользящая медиана
+    (``_windowed_median_ref``).
+    """
+    altitudes = np.asarray(altitudes, dtype=float)
+    S = np.asarray(S, dtype=float)
+    n_alt, n_l = S.shape
+
+    def fallback():
+        return _windowed_median_ref(S)
+
+    if n_alt < 5:
+        return fallback()
+    t = altitudes - altitudes[0]
+    span = t[-1] - t[0]
+    if span <= 0:
+        return fallback()
+    tn = t / span
+
+    from scipy.interpolate import make_smoothing_spline
+
+    out = np.full_like(S, np.nan)
+    for li in range(n_l):
+        y = S[:, li]
+        ok = np.isfinite(y)
+        if ok.sum() < 5:
+            out[:, li] = _windowed_median_ref(S[:, [li]])[:, 0]
+            continue
+        scale = float(np.max(np.abs(y[ok])))
+        if not (scale > 0 and np.isfinite(scale)):
+            out[:, li] = _windowed_median_ref(S[:, [li]])[:, 0]
+            continue
+        try:
+            spl = make_smoothing_spline(tn[ok], y[ok] / scale, lam=LIDAR_REF_LAM)
+            out[ok, li] = spl(tn[ok]) * scale
+        except Exception:
+            out[:, li] = _windowed_median_ref(S[:, [li]])[:, 0]
+    return out
+
+
+def _apply_lidar_ratio_constraint(solutions_per_alt, altitudes, common, args) -> None:
+    """Ограничение плавности лидарного отношения S = α/β с высотой.
+
+    Переранжирование решений каждой высоты на месте (списки
+    ``solutions_per_alt[h]`` сортируются по новому рангу):
+
+        score = Err + w · mean_λ |ln S_сол(λ) − ln S_ref(h, λ)|,
+
+    где S_ref — опорный профиль, сглаженная по высотам оценка S. Оценка
+    S для высоты — медиана S по top-K решениям-кандидатам (K = max(3·G, 9));
+    итерации обновляют top-K отобранных и опорный профиль (до
+    ``args.lidar_ratio_iter`` раундов, досрочно — при стабилизации выбора
+    лучших G).
+    """
+    n_alt = len(altitudes)
+    n_l = len(common)
+    g_eff = [max(1, min(args.best, len(sols))) for sols in solutions_per_alt]
+    k_eff = [min(len(sols), max(3 * g, 9)) for sols, g in zip(solutions_per_alt, g_eff)]
+
+    # S каждого решения каждой высоты ((n_alt, n_sol) списки массивов n_λ)
+    s_table = [np.array([_lidar_ratio(s.g_fit, common) for s in sols])
+               for sols in solutions_per_alt]
+
+    def estimate_top_k(h: int) -> np.ndarray:
+        """Медиана S по top-K решениям высоты (отсортированы по текущему рангу)."""
+        pool = s_table[h][:k_eff[h]]
+        est = np.full(n_l, np.nan)
+        for li in range(n_l):
+            v = pool[:, li]
+            if np.isfinite(v).any():
+                est[li] = float(np.nanmedian(v))
+        return est
+
+    def smooth_ref():
+        est_mat = np.array([estimate_top_k(h) for h in range(n_alt)])
+        ref = _smooth_ref_profile(altitudes, est_mat)
+        # остаточные NaN (нет данных для λ) — медиана по столбцу профиля
+        for li in range(n_l):
+            col = ref[:, li]
+            bad = ~np.isfinite(col)
+            if bad.any():
+                fill = float(np.nanmedian(col))
+                if np.isfinite(fill):
+                    ref[bad, li] = fill
+        return ref
+
+    prev_tops = None
+    for it in range(max(1, args.lidar_ratio_iter)):
+        ref = smooth_ref()
+        for h, sols in enumerate(solutions_per_alt):
+            log_ref = np.log(np.maximum(ref[h], 1e-300))
+            scores = []
+            for s, s_r in zip(sols, s_table[h]):
+                log_s = np.log(np.maximum(s_r, 1e-300))
+                dev = float(np.nanmean(np.abs(log_s - log_ref)))
+                if not np.isfinite(dev):
+                    dev = 0.0
+                scores.append(s.err + args.lidar_ratio_w * dev)
+            order = np.argsort(scores, kind="stable")
+            sols[:] = [sols[i] for i in order]
+            s_table[h] = s_table[h][order]
+        tops = [tuple(id(s) for s in sols[:g])
+                for sols, g in zip(solutions_per_alt, g_eff)]
+        if tops == prev_tops:
+            break
+        prev_tops = tops
+
+
+def _scan_profile(args, channels, tables, g1):
+    """Фаза перебора: полный список решений для одной высоты.
+
+    Возвращает (solutions, scale): solutions уже отсортированы по Err.
+    Список решений сохраняется между высотами — он нужен для ограничения
+    лидарного отношения (переранжирование) и для финализации.
+    """
     degrees = sorted(set(args.degree))
     r0_grid = np.geomspace(args.r0_min, args.r0_max, args.nr0)
     r1_grid = np.geomspace(args.r1_min, args.r1_max, args.nr1)
 
     print("перебор (m, r0, r1, степень)...")
     try:
-        solutions, _scale = scan_variants(
+        solutions, scale = scan_variants(
             channels, tables, g1, degrees, r0_grid, r1_grid,
             min_ratio=args.min_ratio,
             gamma_exp_min=args.gamma_min, gamma_exp_max=args.gamma_max,
@@ -167,6 +330,17 @@ def _solve_profile(args, channels, tables, g1):
         raise SystemExit(f"ошибка: {exc}") from None
     if not solutions:
         raise SystemExit("нет ни одного допустимого окна [r0, r1]")
+    return solutions, scale
+
+
+def _finalize_profile(args, channels, tables, g1, solutions):
+    """Фаза финализации одной высоты: ансамбль, моменты, моды.
+
+    Принимает уже отобранные (отсортированные) решения ``solutions`` —
+    начиная с них (``solutions[:best]``) строится усреднённое распределение.
+    Возвращает dict со всеми результатами профиля (см. ``_write_profile``).
+    """
+    from . import mode_analysis, size_moments  # избегаем циклического импорта
 
     r_grid = np.geomspace(args.r0_min, args.r1_max, 256)
     n_avg, n_best, m_avg = ensemble_average(solutions, args.best, r_grid,
@@ -298,6 +472,10 @@ def run_batch(args) -> None:
     for ch in channels:
         print(f"  канал: {ch.name} ({ch.kind}, {ch.wl_um * 1e3:g} нм)")
     print("  единицы β [1/(м·ср)], α [1/м]")
+    lr_flag = args.lidar_ratio_cons
+    print("ограничение плавности лидарного отношения S=α/β с высотой: "
+          + (f"включено (вес {args.lidar_ratio_w:g}, итераций <= {args.lidar_ratio_iter})"
+             if lr_flag else "выключено"))
 
     # 1) таблица ядер строится один раз и переиспользуется для всех высот
     solve_channels, tables = _build_kernel_tables(args, channels, m_grid)
@@ -316,13 +494,54 @@ def run_batch(args) -> None:
         fe.write("# H  " + "  ".join(ch.name for ch in channels) + "  Err\n" +
                  "# относительные ошибки |g_fit-g1|/g1 (Err = сумма по каналам)\n")
 
-    # 2) для каждой высоты — поиск решения и запись выходов
+    common = _common_lidar_wavelengths(channels)
+    write_lidar = lr_flag and bool(common)
+
+    # 2) фаза перебора: решения всех высот сохраняются (нужны для ограничения)
+    solutions_per_alt = []
     for h, g1 in zip(altitudes, data):
-        prof = _solve_profile(args, solve_channels, tables, g1)
+        solutions, _scale = _scan_profile(args, solve_channels, tables, g1)
+        solutions_per_alt.append(solutions)
+        print(f"  высота {h:g} м: вариантов {len(solutions)}")
+
+    # 3) ограничение лидарного отношения (если включено и применимо)
+    if lr_flag:
+        if len(altitudes) < 2:
+            print("  [предупреждение] --lidar-ratio-cons: нужно >= 2 высот; "
+                  "ограничение не применяется")
+        elif not common:
+            print("  [предупреждение] --lidar-ratio-cons: нет общих длин волн "
+                  "β∩α для лидарного отношения; ограничение не применяется")
+        else:
+            print("  применяем ограничение: общие длины волн "
+                  + ", ".join(f"{wl * 1e3:g} нм" for wl, _, _ in common))
+            _apply_lidar_ratio_constraint(solutions_per_alt, altitudes, common, args)
+
+    if write_lidar:
+        with open(os.path.join(out_dir, "lidar_ratios.txt"), "w", encoding="utf-8") as fl:
+            fl.write("# H  " + "  ".join(f"S_{wl * 1e3:g}" for wl, _, _ in common) + "\n")
+            fl.write("# восстановленное лидарное отношение S = α/β по общим длинам волн\n")
+
+    # 4) финализация по каждой высоте и запись выходов
+    for i in range(len(altitudes)):
+        h, g1 = altitudes[i], data[i]
+        solutions = solutions_per_alt[i]
+        prof = _finalize_profile(args, solve_channels, tables, g1, solutions)
         _write_profile(out_dir, h, channels, prof, g1)
         _plot_profile(os.path.join(out_dir, f"plot_{h:g}.png"), channels, g1, prof)
+        s_str = ""
+        if write_lidar:
+            s_vals = _lidar_ratio(prof["g_fit"], common)
+            with open(os.path.join(out_dir, "lidar_ratios.txt"), "a",
+                      encoding="utf-8") as fl:
+                fl.write(f"{h:g}  " + "  ".join(
+                    f"{v:g}" if np.isfinite(v) else "nan" for v in s_vals) + "\n")
+            s_str = "  S = " + ", ".join(
+                f"{v:g}" if np.isfinite(v) else "nan" for v in s_vals)
         print(f"  высота {h:g} м: ⟨m⟩ = {prof['m_avg'].real:.3f}"
               f"{prof['m_avg'].imag:+.3f}j, "
-              f"N = {prof['moments']['N_cm-3']:.3g} см⁻³")
+              f"N = {prof['moments']['N_cm-3']:.3g} см⁻³{s_str}")
+        # списки решений больше не нужны — освобождаем память
+        solutions_per_alt[i] = None
 
     print(f"пакетная обработка завершена; результаты: {out_dir}")
