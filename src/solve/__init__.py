@@ -535,6 +535,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--data", metavar="JSON", default=None,
                    help="файл с измеренными коэффициентами (см. README); "
                         "без него запускается демонстрация на синтетических данных")
+    p.add_argument("--batch", metavar="TXT", default=None,
+                   help="пакетная обработка: txt-файл со столбцами "
+                        "Altitude b<нм>... a<нм>... (по строке на высоту); "
+                        "таблица ядер строится один раз на весь пакет")
+    p.add_argument("--batch-out-dir", metavar="DIR", default=None,
+                   help="каталог для результатов пакетной обработки (.txt, .png); "
+                        "по умолчанию — рядом с входным txt (без расширения)")
     p.add_argument("--degree", nargs="+", type=int, default=[1, 2, 3, 4],
                    help="степени B-сплайнов (1..4) [по умолчанию: 1 2 3 4]")
     p.add_argument("--n-basis", metavar="N", type=int, default=None,
@@ -608,6 +615,11 @@ def main(argv=None) -> None:
 
     if args.no_jit:
         set_mie_jit(False)
+
+    if args.batch is not None:
+        from .batch import run_batch
+        run_batch(args)
+        return
 
     degrees = sorted(set(args.degree))
     if any(k < 1 or k > 4 for k in degrees):
