@@ -150,6 +150,8 @@ Re = 1.40/1.45/1.50 × Im = −0.01/−0.005/0.
 
 ## Установка и запуск
 
+**Способ 1 — uv (рекомендуется):**
+
 ```bash
 uv sync                                   # создать окружение (numpy, scipy, matplotlib, miepython)
 uv run python -m solve                    # демонстрация на синтетических данных + график
@@ -158,11 +160,46 @@ uv run python -m solve --data data.json   # по реальным измерен
 uv run solve
 ```
 
+**Способ 2 — без uv (pip + venv):**
+
+Зависимости перечислены в `requirements.txt` (пиннинг через
+`uv pip compile pyproject.toml`):
+
+```bash
+python3 -m venv .venv                     # создать окружение
+source .venv/bin/activate                 # активировать (Windows: .venv\Scripts\activate)
+pip install -r requirements.txt           # установить зависимости (numpy, scipy, matplotlib, miepython)
+pip install .                             # установить сам пакет
+solve --help                              # или: python -m solve
+```
+
+`pip install .` собирает пакет через PEP 517-бэкенд `uv_build`, который pip
+сам скачает с PyPI — отдельно ставить uv не нужно. Если нужна разработка
+без переустановки после правок, ставьте в режиме редактирования:
+`pip install -e .` (зависимости можно не ставить отдельно — pip
+подтянет их сам из `pyproject.toml`).
+
+Возможна также установка **без сборки пакета** — достаточно зависимостей
+из `requirements.txt` и добавления `src` в путь поиска модулей:
+
+```bash
+git clone <этот-репозиторий> && cd solve
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+PYTHONPATH=src python -m solve           # *nix/macOS
+# Windows (PowerShell): $env:PYTHONPATH="src"; python -m solve
+```
+
+Требуется Python ≥ 3.14 (см. `pyproject.toml`).
+
 Тесты:
 
 ```bash
-uv run python tests/test_smoke.py
-uv run pytest tests/ -q                   # если установлен pytest
+uv run python tests/test_smoke.py        # с uv
+python tests/test_smoke.py               # без uv (в активированном venv)
+uv run pytest tests/ -q                  # если установлен pytest
+pytest tests/ -q                         # без uv (в активированном venv)
 ```
 
 ## Параметры командной строки
