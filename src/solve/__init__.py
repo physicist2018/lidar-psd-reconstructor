@@ -40,7 +40,14 @@ import numpy as np
 
 from .basis import quadrature_grid
 from .inverse import ensemble_average, scan_variants
-from .kernels import Channel, KernelTable, dvol_dlnr_factor, mie_jit_enabled, set_mie_jit
+from .kernels import (
+    Channel,
+    KernelTable,
+    dvol_dlnr_factor,
+    load_table_channels,
+    mie_jit_enabled,
+    set_mie_jit,
+)
 
 __all__ = [
     "Channel", "KernelTable", "scan_variants", "ensemble_average",
@@ -386,10 +393,10 @@ def demo_true_distribution(r, fine: tuple = DEMO_FINE,
     return lognormal_volume(r, *fine) + lognormal_volume(r, *coarse)
 
 
-def _demo_measurements(args, channels, kernels: KernelTable):
+def _demo_measurements(args, channels, kernels: KernelTable, r1_max: float):
     """Измеренные коэффициенты для демонстрации (с опциональным шумом)."""
     g1 = forward_measurements(channels, kernels, demo_true_distribution,
-                              args.r0_min, args.r1_max)
+                              args.r0_min, r1_max)
     if args.noise > 0:
         rng = np.random.default_rng(args.seed)
         g1 = g1 * (1.0 + rng.normal(0.0, args.noise, size=g1.size))
@@ -541,6 +548,14 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--data", metavar="JSON", default=None,
                    help="файл с измеренными коэффициентами (см. README); "
                         "без него запускается демонстрация на синтетических данных")
+    p.add_argument("--tables", metavar="DIR", default=None,
+                   help="табличный режим ядер: корень с каталогами "
+                        "m<real>_i<imag>/ и файлами Cext_<нм>.txt / "
+                        "Cback_<нм>.txt (сечения в мкм² от параметра x); "
+                        "по умолчанию — ядра Mie через miepython")
+    p.add_argument("--table-extrapolate", action="store_true",
+                   help="разрешить экстраполяцию сечения за пределы диапазона x "
+                        "в табличном режиме (по умолчанию — ошибка)")
     p.add_argument("--batch", metavar="TXT", default=None,
                    help="пакетная обработка: txt-файл со столбцами "
                         "Altitude b<нм>... a<нм>... (по строке на высоту); "
@@ -646,7 +661,10 @@ def main(argv=None) -> None:
 
     if args.batch is not None:
         from .batch import run_batch
-        run_batch(args)
+        try:
+            run_batch(args)
+        except FileNotFoundError as exc:
+            raise SystemExit(f"ошибка таблиц: {exc}") from None
         return
 
     degrees = sorted(set(args.degree))
@@ -705,27 +723,65 @@ def main(argv=None) -> None:
     for mv in m_grid:
         print(f"  m = {mv.real:.3f}{mv.imag:+.3f}j")
 
-    print(f"строим таблицы ядер Mie ({len(m_grid)} значений m, miepython)...")
-    print(f"  Mie-бэкенд: {'numba (JIT)' if mie_jit_enabled() else 'чистый Python'}")
-    tables: dict = {}
-    for mv in m_grid:
-        tables[mv] = KernelTable(mv, channels, args.r0_min, args.r1_max,
-                                 dx_max=args.dx_max)
-    n_pts = tables[m_grid[0]].r.size
-    print(f"  таблица: {n_pts} точек по r на каждое m")
+    try:
+        print(f"строим таблицы ядер ({len(m_grid)} значений m)...")
+        if args.tables is None:
+            r1_max_eff = args.r1_max
+            print(f"  Mie-бэкенд: {'numba (JIT)' if mie_jit_enabled() else 'чистый Python'}")
+        else:
+            # табличный режим: покрытие по x ограничивает верхнюю границу окон
+            caps = []
+            for mv in m_grid:
+                _chs, cap = load_table_channels(args.tables, mv, channels,
+                                                args.table_extrapolate)
+                caps.append(cap)
+            r1_cap = float(min(caps))
+            r1_max_eff = min(args.r1_max, r1_cap)
+            if r1_max_eff < args.r1_min:
+                raise SystemExit(
+                    f"покрытие таблиц по x ограничивает r1_max = {r1_max_eff:g} мкм < "
+                    f"r1_min = {args.r1_min:g} — расширьте таблицы или уменьшите --r1-min")
+            print(f"табличный режим ядер (внешние сечения), корень: {args.tables}")
+            _chs0, _ = load_table_channels(args.tables, m_grid[0], channels,
+                                           args.table_extrapolate)
+            for ch in _chs0:
+                print(f"  {ch.name:<14} x_max = {ch.table.x_max:g}, "
+                      f"r_max = {ch.table.x_max * ch.wl_um / (2 * np.pi):.3g} мкм")
+            print(f"  эффективный r1_max = {r1_max_eff:g} мкм "
+                  f"(задан: {args.r1_max:g}) — окна и сетка r ограничены")
+        tables: dict = {}
+        for mv in m_grid:
+            if args.tables is not None:
+                chs_tbl, _ = load_table_channels(args.tables, mv, channels,
+                                                 args.table_extrapolate)
+                tables[mv] = KernelTable(mv, chs_tbl, args.r0_min, r1_max_eff,
+                                         dx_max=args.dx_max)
+            else:
+                tables[mv] = KernelTable(mv, channels, args.r0_min, r1_max_eff,
+                                         dx_max=args.dx_max)
+        n_pts = tables[m_grid[0]].r.size
+        print(f"  таблица: {n_pts} точек по r на каждое m")
+    except FileNotFoundError as exc:
+        raise SystemExit(f"ошибка таблиц: {exc}") from None
 
     if args.data is None:
         # таблица для «истинного» m демо (переиспользуем, если есть в сетке)
         true_kernels = tables.get(m)
         if true_kernels is None:
             print(f"  строим таблицу для истинного m демо: m = {m.real:g}{m.imag:+g}j")
-            true_kernels = KernelTable(m, channels, args.r0_min, args.r1_max,
-                                       dx_max=args.dx_max)
-        g1 = _demo_measurements(args, channels, true_kernels)
+            if args.tables is not None:
+                chs_tbl, _ = load_table_channels(args.tables, m, channels,
+                                                 args.table_extrapolate)
+                true_kernels = KernelTable(m, chs_tbl, args.r0_min, r1_max_eff,
+                                           dx_max=args.dx_max)
+            else:
+                true_kernels = KernelTable(m, channels, args.r0_min, r1_max_eff,
+                                           dx_max=args.dx_max)
+        g1 = _demo_measurements(args, channels, true_kernels, r1_max_eff)
         print("измеренные коэффициенты g1:", np.array2string(g1, precision=5))
 
     r0_grid = np.geomspace(args.r0_min, args.r0_max, args.nr0)
-    r1_grid = np.geomspace(args.r1_min, args.r1_max, args.nr1)
+    r1_grid = np.geomspace(args.r1_min, r1_max_eff, args.nr1)
 
     print("перебор (m, r0, r1, степень)...")
     try:
@@ -749,7 +805,7 @@ def main(argv=None) -> None:
         raise SystemExit("нет ни одного допустимого окна [r0, r1] — "
                          "проверьте границы и min-ratio")
 
-    r_grid = np.geomspace(args.r0_min, args.r1_max, 256)
+    r_grid = np.geomspace(args.r0_min, r1_max_eff, 256)
     n_avg, n_best, m_avg = ensemble_average(solutions, args.best, r_grid,
                                             smooth=not args.no_smooth,
                                             lam_rel=args.smooth_lam)
@@ -759,7 +815,7 @@ def main(argv=None) -> None:
     # расчётные g для усреднённых решения и показателя преломления:
     # ядра усредняются по G лучшим решениям (по их m), распределение —
     # объёмное F = dV/dln r, поэтому ядра умножаются на q(r) = 3/(4π r⁴)
-    r_q, w_q = quadrature_grid(np.array([args.r0_min, args.r1_max]),
+    r_q, w_q = quadrature_grid(np.array([args.r0_min, r1_max_eff]),
                                args.quad_order, args.log_span)
     n_q = np.interp(r_q, r_grid, np.nan_to_num(n_avg, nan=0.0))
     g_best = solutions[: max(1, min(args.best, len(solutions)))]

@@ -45,7 +45,13 @@ import numpy as np
 
 from .basis import quadrature_grid
 from .inverse import ensemble_average, scan_variants
-from .kernels import Channel, KernelTable, dvol_dlnr_factor
+from .kernels import (
+    Channel,
+    KernelTable,
+    dvol_dlnr_factor,
+    load_table_channels,
+    mie_jit_enabled,
+)
 
 CM3_PER_M3 = 1e6
 
@@ -127,19 +133,53 @@ def _m_grid_from_args(args):
 
 
 def _build_kernel_tables(args, channels, m_grid):
-    """Таблица ядер Mie: строится ОДИН раз на весь пакет.
+    """Таблица ядер: строится ОДИН раз на весь пакет.
 
     Зависит только от (m, каналы, диапазон r) — измеренные g1 не участвуют,
-    поэтому таблицы переиспользуются для всех высот.
+    поэтому таблицы переиспользуются для всех высот. В табличном режиме
+    (``args.tables``) ядра берутся из внешних таблиц сечений, а верхняя
+    граница окон ограничивается покрытием таблиц по x (см. ``r1_max_eff``).
+
+    Возвращает (solve_channels, tables, r1_max_eff).
     """
     solve_channels = [Channel(ch.kind, ch.wl_um) for ch in channels]
+    if args.tables is not None:
+        caps = []
+        for mv in m_grid:
+            _chs, cap = load_table_channels(args.tables, mv, solve_channels,
+                                            args.table_extrapolate)
+            caps.append(cap)
+        r1_max_eff = min(args.r1_max, float(min(caps)))
+        if r1_max_eff < args.r1_min:
+            raise SystemExit(
+                f"покрытие таблиц по x ограничивает r1_max = {r1_max_eff:g} мкм < "
+                f"r1_min = {args.r1_min:g} — расширьте таблицы или уменьшите --r1-min")
+        print(f"табличный режим ядер (внешние сечения), корень: {args.tables}")
+        _chs0, _ = load_table_channels(args.tables, m_grid[0], solve_channels,
+                                       args.table_extrapolate)
+        for ch in _chs0:
+            print(f"  {ch.name:<14} x_max = {ch.table.x_max:g}, "
+                  f"r_max = {ch.table.x_max * ch.wl_um / (2 * np.pi):.3g} мкм")
+        print(f"  эффективный r1_max = {r1_max_eff:g} мкм "
+              f"(задан: {args.r1_max:g}) — окна и сетка r ограничены")
+    else:
+        r1_max_eff = args.r1_max
+
+    print(f"строим таблицы ядер ({len(m_grid)} значений m, один раз на пакет)...")
+    if args.tables is None:
+        print(f"  Mie-бэкенд: {'numba (JIT)' if mie_jit_enabled() else 'чистый Python'}")
     tables = {}
-    print(f"строим таблицы ядер Mie ({len(m_grid)} значений m, один раз на пакет)...")
     for mv in m_grid:
-        tables[mv] = KernelTable(mv, solve_channels, args.r0_min, args.r1_max,
-                                 dx_max=args.dx_max)
+        if args.tables is not None:
+            chs_tbl, _ = load_table_channels(args.tables, mv, solve_channels,
+                                             args.table_extrapolate)
+            tables[mv] = KernelTable(mv, chs_tbl, args.r0_min, r1_max_eff,
+                                     dx_max=args.dx_max)
+        else:
+            tables[mv] = KernelTable(mv, solve_channels, args.r0_min, r1_max_eff,
+                                     dx_max=args.dx_max)
     print(f"  таблица: {tables[m_grid[0]].r.size} точек по r на каждое m")
-    return solve_channels, tables
+    return solve_channels, tables, r1_max_eff
 
 
 def _common_lidar_wavelengths(channels):
@@ -299,7 +339,7 @@ def _apply_lidar_ratio_constraint(solutions_per_alt, altitudes, common, args) ->
         prev_tops = tops
 
 
-def _scan_profile(args, channels, tables, g1):
+def _scan_profile(args, channels, tables, g1, r1_max):
     """Фаза перебора: полный список решений для одной высоты.
 
     Возвращает (solutions, scale): solutions уже отсортированы по Err.
@@ -308,7 +348,7 @@ def _scan_profile(args, channels, tables, g1):
     """
     degrees = sorted(set(args.degree))
     r0_grid = np.geomspace(args.r0_min, args.r0_max, args.nr0)
-    r1_grid = np.geomspace(args.r1_min, args.r1_max, args.nr1)
+    r1_grid = np.geomspace(args.r1_min, r1_max, args.nr1)
 
     print("перебор (m, r0, r1, степень)...")
     try:
@@ -333,7 +373,7 @@ def _scan_profile(args, channels, tables, g1):
     return solutions, scale
 
 
-def _finalize_profile(args, channels, tables, g1, solutions):
+def _finalize_profile(args, channels, tables, g1, solutions, r1_max):
     """Фаза финализации одной высоты: ансамбль, моменты, моды.
 
     Принимает уже отобранные (отсортированные) решения ``solutions`` —
@@ -342,14 +382,14 @@ def _finalize_profile(args, channels, tables, g1, solutions):
     """
     from . import mode_analysis, size_moments  # избегаем циклического импорта
 
-    r_grid = np.geomspace(args.r0_min, args.r1_max, 256)
+    r_grid = np.geomspace(args.r0_min, r1_max, 256)
     n_avg, n_best, m_avg = ensemble_average(solutions, args.best, r_grid,
                                             smooth=not args.no_smooth,
                                             lam_rel=args.smooth_lam)
     n_avg_raw = ensemble_average(solutions, args.best, r_grid, smooth=False)[0]
 
     # расчётные g для среднего решения (ядра усредняются по G лучшим)
-    r_q, w_q = quadrature_grid(np.array([args.r0_min, args.r1_max]),
+    r_q, w_q = quadrature_grid(np.array([args.r0_min, r1_max]),
                                args.quad_order, args.log_span)
     n_q = np.interp(r_q, r_grid, np.nan_to_num(n_avg, nan=0.0))
     g_best = solutions[: max(1, min(args.best, len(solutions)))]
@@ -478,7 +518,7 @@ def run_batch(args) -> None:
              if lr_flag else "выключено"))
 
     # 1) таблица ядер строится один раз и переиспользуется для всех высот
-    solve_channels, tables = _build_kernel_tables(args, channels, m_grid)
+    solve_channels, tables, r1_max_eff = _build_kernel_tables(args, channels, m_grid)
 
     out_dir = args.batch_out_dir or os.path.dirname(os.path.abspath(args.batch))
     os.makedirs(out_dir, exist_ok=True)
@@ -500,7 +540,7 @@ def run_batch(args) -> None:
     # 2) фаза перебора: решения всех высот сохраняются (нужны для ограничения)
     solutions_per_alt = []
     for h, g1 in zip(altitudes, data):
-        solutions, _scale = _scan_profile(args, solve_channels, tables, g1)
+        solutions, _scale = _scan_profile(args, solve_channels, tables, g1, r1_max_eff)
         solutions_per_alt.append(solutions)
         print(f"  высота {h:g} м: вариантов {len(solutions)}")
 
@@ -526,7 +566,7 @@ def run_batch(args) -> None:
     for i in range(len(altitudes)):
         h, g1 = altitudes[i], data[i]
         solutions = solutions_per_alt[i]
-        prof = _finalize_profile(args, solve_channels, tables, g1, solutions)
+        prof = _finalize_profile(args, solve_channels, tables, g1, solutions, r1_max_eff)
         _write_profile(out_dir, h, channels, prof, g1)
         _plot_profile(os.path.join(out_dir, f"plot_{h:g}.png"), channels, g1, prof)
         s_str = ""

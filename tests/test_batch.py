@@ -43,6 +43,7 @@ def _args(**overrides) -> argparse.Namespace:
         dx_max=0.1, no_jit=False, quad_order=24, log_span=0.1,
         m_real=1.45, m_imag=-0.005,
         m_reals=None, m_imags=None,
+        tables=None, table_extrapolate=False,
         noise=0.0, seed=1, out="result.png", json=None, no_plot=True,
         lidar_ratio_cons=False, lidar_ratio_w=0.5, lidar_ratio_iter=3,
     )
