@@ -1,10 +1,12 @@
 """Тесты табличного режима ядер (внешние таблицы сечений Cext/Cback).
 
 Проверяем: парсинг файлов ``x C``, интерполяцию, перевод единиц (мкм²→м²),
-маппинг r→x по длине волны, покрытие по x (ограничение r_max), поведение при
+пересчёт с эталонной длины волны таблицы ``λ_ref`` на длину волны канала
+(``(λ/λ_ref)²``), маппинг r→x, покрытие по x (ограничение r_max), структуру
+каталогов (каталог на m с файлами Cext.txt/Cback.txt), поведение при
 выходе за пределы таблицы и самосогласованность с Mie-ядрами: таблицы,
-снятые из miepython для того же (m, λ), должны воспроизводить ядра и
-результат инверсии.
+снятые из miepython при λ_ref, должны воспроизводить ядра и результат
+инверсии.
 """
 
 from __future__ import annotations
@@ -35,26 +37,31 @@ def make_channels():
 
 
 def dump_tables(root: str, m: complex, channels, x_max: float, n: int = 400,
-                linear: bool = False) -> None:
+                linear: bool = False, ref_wl_um: float = 2.0 * np.pi) -> None:
     """Снять сечения C_ext/C_back (мкм²) из miepython в структуру каталогов.
 
-    Каталог ``<root>/m{real:g}_i{imag:g}/``, файлы ``Cext_<нм>.txt`` /
-    ``Cback_<нм>.txt`` — тот же формат, что читает ``TabularCrossSection``.
+    Каталог ``<root>/m{real:g}_i{imag:g}/``, файлы ``Cext.txt`` / ``Cback.txt``
+    (по одной таблице на ``(m, вид)``) — тот же формат, что читает
+    ``TabularCrossSection``. Сечения считаются при эталонной длине волны
+    ``ref_wl_um`` (по умолчанию 2π мкм): для параметра размера ``x`` радиус
+    ``r = x·ref_wl_um/(2π)``, ``C_ext = π r² q_ext``, ``C_back = r² q_back / 4``.
     При ``linear=True`` сетка x равномерная (шаг x_max/n), иначе —
-    лог-эквидистантная (как в реальных таблицах пользователя).
+    лог-эквидистантная (как в реальных таблицах).
     """
     mdir = os.path.join(root, f"m{m.real:g}_i{m.imag:g}")
     os.makedirs(mdir, exist_ok=True)
     x = (np.linspace(0.1, x_max, n) if linear
          else np.geomspace(0.1, x_max, n))
     qext, _qsca, qback, _g = mie.efficiencies_mx(m, x)
-    for ch in channels:
-        r_um = x * ch.wl_um / (2.0 * np.pi)
-        C = (np.pi * r_um ** 2 * qext if ch.kind == "alpha"
-             else r_um ** 2 * qback / 4.0)
-        prefix = "Cext" if ch.kind == "alpha" else "Cback"
-        wl_nm = int(round(ch.wl_um * 1e3))
-        with open(os.path.join(mdir, f"{prefix}_{wl_nm}.txt"), "w",
+    r_um = x * ref_wl_um / (2.0 * np.pi)
+    kinds = {ch.kind for ch in channels}
+    for kind, prefix, C in (
+        ("alpha", "Cext", np.pi * r_um ** 2 * qext),
+        ("beta", "Cback", r_um ** 2 * qback / 4.0),
+    ):
+        if kind not in kinds:
+            continue
+        with open(os.path.join(mdir, f"{prefix}.txt"), "w",
                   encoding="utf-8") as fh:
             for xi, ci in zip(x, C):
                 fh.write(f"{xi:.6e}  {ci:.6e}\n")
@@ -142,6 +149,45 @@ def test_load_table_channels_structure() -> None:
         for c, c0 in zip(chs, channels):
             assert c0.kind == c.kind and c0.wl_um == c.wl_um
             assert np.isclose(c.table.x_max, 20.0)
+            assert c.table_ref_wl_um == 2.0 * np.pi
+
+
+def test_table_layout_per_m() -> None:
+    """Структура: каталог на m, внутри Cext.txt / Cback.txt (без _<нм>)."""
+    channels = make_channels()
+    with tempfile.TemporaryDirectory() as td:
+        dump_tables(td, M, channels, x_max=20.0)
+        mdir = os.path.join(td, f"m{M.real:g}_i{M.imag:g}")
+        assert os.path.isfile(os.path.join(mdir, "Cext.txt"))
+        assert os.path.isfile(os.path.join(mdir, "Cback.txt"))
+        assert not any("_355" in fn or "_532" in fn or "_1064" in fn
+                       for fn in os.listdir(mdir))
+        chs, _ = load_table_channels(td, M, channels)
+        assert all(c.table is not None for c in chs)
+        assert all(c.table_ref_wl_um == 2.0 * np.pi for c in chs)
+        # каналы одного вида (alpha/beta) делят одну загруженную таблицу
+        alphas = [c for c in chs if c.kind == "alpha"]
+        assert len({id(c.table) for c in alphas}) == 1
+
+
+def test_table_ref_lambda_scaling() -> None:
+    """Пересчёт (λ/λ_ref)²: таблица при 2π воспроизводит Mie; смена λ_ref
+    меняет ядро в постоянное число раз."""
+    channels = make_channels()
+    with tempfile.TemporaryDirectory() as td:
+        dump_tables(td, M, channels, x_max=40.0, n=2000, linear=True)
+        r = np.geomspace(0.2, 2.0, 50)
+        for ch in channels:
+            ch_ref, _ = load_table_channels(td, M, [ch], ref_wl_um=2.0 * np.pi)
+            ch_one, _ = load_table_channels(td, M, [ch], ref_wl_um=1.0)
+            k_ref = ch_ref[0].kernel(M, r)
+            k_one = ch_one[0].kernel(M, r)
+            # таблица при 2π → совпадение с Mie-ядром канала
+            k_mie = ch.kernel(M, r)
+            rel = np.median(np.abs(k_ref - k_mie) / np.maximum(k_mie, 1e-30))
+            assert rel < 1e-3, f"{ch.name}: медиана rel err = {rel:.4g}"
+            # λ_ref = 1 вместо 2π → постоянный множитель (2π)²
+            assert np.allclose(k_one / k_ref, (2.0 * np.pi) ** 2, rtol=1e-6)
 
 
 def test_tabular_inversion_matches_mie() -> None:

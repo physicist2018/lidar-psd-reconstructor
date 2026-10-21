@@ -550,12 +550,16 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "без него запускается демонстрация на синтетических данных")
     p.add_argument("--tables", metavar="DIR", default=None,
                    help="табличный режим ядер: корень с каталогами "
-                        "m<real>_i<imag>/ и файлами Cext_<нм>.txt / "
-                        "Cback_<нм>.txt (сечения в мкм² от параметра x); "
+                        "m<real>_i<imag>/, внутри — файлы Cext.txt / Cback.txt "
+                        "(сечения C(x) в мкм², снятые при λ_ref = 2π мкм); "
                         "по умолчанию — ядра Mie через miepython")
     p.add_argument("--table-extrapolate", action="store_true",
                    help="разрешить экстраполяцию сечения за пределы диапазона x "
                         "в табличном режиме (по умолчанию — ошибка)")
+    p.add_argument("--table-ref-lambda-um", type=float, default=2.0 * np.pi,
+                   help="длина волны (мкм), при которой посчитаны внешние "
+                        "таблицы сечений; сечение пересчитывается на длину волны "
+                        "канала как (λ/λ_ref)² [2π]")
     p.add_argument("--batch", metavar="TXT", default=None,
                    help="пакетная обработка: txt-файл со столбцами "
                         "Altitude b<нм>... a<нм>... (по строке на высоту); "
@@ -733,7 +737,8 @@ def main(argv=None) -> None:
             caps = []
             for mv in m_grid:
                 _chs, cap = load_table_channels(args.tables, mv, channels,
-                                                args.table_extrapolate)
+                                                args.table_extrapolate,
+                                                ref_wl_um=args.table_ref_lambda_um)
                 caps.append(cap)
             r1_cap = float(min(caps))
             r1_max_eff = min(args.r1_max, r1_cap)
@@ -742,8 +747,11 @@ def main(argv=None) -> None:
                     f"покрытие таблиц по x ограничивает r1_max = {r1_max_eff:g} мкм < "
                     f"r1_min = {args.r1_min:g} — расширьте таблицы или уменьшите --r1-min")
             print(f"табличный режим ядер (внешние сечения), корень: {args.tables}")
+            print(f"  λ_ref таблиц = {args.table_ref_lambda_um:g} мкм "
+                  f"(сечения пересчитываются как (λ/λ_ref)²)")
             _chs0, _ = load_table_channels(args.tables, m_grid[0], channels,
-                                           args.table_extrapolate)
+                                           args.table_extrapolate,
+                                           ref_wl_um=args.table_ref_lambda_um)
             for ch in _chs0:
                 print(f"  {ch.name:<14} x_max = {ch.table.x_max:g}, "
                       f"r_max = {ch.table.x_max * ch.wl_um / (2 * np.pi):.3g} мкм")
@@ -753,7 +761,8 @@ def main(argv=None) -> None:
         for mv in m_grid:
             if args.tables is not None:
                 chs_tbl, _ = load_table_channels(args.tables, mv, channels,
-                                                 args.table_extrapolate)
+                                                 args.table_extrapolate,
+                                                 ref_wl_um=args.table_ref_lambda_um)
                 tables[mv] = KernelTable(mv, chs_tbl, args.r0_min, r1_max_eff,
                                          dx_max=args.dx_max)
             else:
@@ -771,7 +780,8 @@ def main(argv=None) -> None:
             print(f"  строим таблицу для истинного m демо: m = {m.real:g}{m.imag:+g}j")
             if args.tables is not None:
                 chs_tbl, _ = load_table_channels(args.tables, m, channels,
-                                                 args.table_extrapolate)
+                                                 args.table_extrapolate,
+                                                 ref_wl_um=args.table_ref_lambda_um)
                 true_kernels = KernelTable(m, chs_tbl, args.r0_min, r1_max_eff,
                                            dx_max=args.dx_max)
             else:

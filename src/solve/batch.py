@@ -147,7 +147,8 @@ def _build_kernel_tables(args, channels, m_grid):
         caps = []
         for mv in m_grid:
             _chs, cap = load_table_channels(args.tables, mv, solve_channels,
-                                            args.table_extrapolate)
+                                            args.table_extrapolate,
+                                            ref_wl_um=args.table_ref_lambda_um)
             caps.append(cap)
         r1_max_eff = min(args.r1_max, float(min(caps)))
         if r1_max_eff < args.r1_min:
@@ -155,8 +156,11 @@ def _build_kernel_tables(args, channels, m_grid):
                 f"покрытие таблиц по x ограничивает r1_max = {r1_max_eff:g} мкм < "
                 f"r1_min = {args.r1_min:g} — расширьте таблицы или уменьшите --r1-min")
         print(f"табличный режим ядер (внешние сечения), корень: {args.tables}")
+        print(f"  λ_ref таблиц = {args.table_ref_lambda_um:g} мкм "
+              f"(сечения пересчитываются как (λ/λ_ref)²)")
         _chs0, _ = load_table_channels(args.tables, m_grid[0], solve_channels,
-                                       args.table_extrapolate)
+                                       args.table_extrapolate,
+                                       ref_wl_um=args.table_ref_lambda_um)
         for ch in _chs0:
             print(f"  {ch.name:<14} x_max = {ch.table.x_max:g}, "
                   f"r_max = {ch.table.x_max * ch.wl_um / (2 * np.pi):.3g} мкм")
@@ -172,7 +176,8 @@ def _build_kernel_tables(args, channels, m_grid):
     for mv in m_grid:
         if args.tables is not None:
             chs_tbl, _ = load_table_channels(args.tables, mv, solve_channels,
-                                             args.table_extrapolate)
+                                             args.table_extrapolate,
+                                             ref_wl_um=args.table_ref_lambda_um)
             tables[mv] = KernelTable(mv, chs_tbl, args.r0_min, r1_max_eff,
                                      dx_max=args.dx_max)
         else:

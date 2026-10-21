@@ -40,6 +40,13 @@ import miepython as mie
 # (1 мкм)^2 = 1e-12 м^2 — перевод сечения из мкм^2 в м^2
 UM2_TO_M2 = 1e-12
 
+# Эталонная длина волны внешних таблиц сечений (мкм). Таблица задаёт C(x) при
+# некоторой фиксированной λ_ref; поскольку сечение ∝ λ², при использовании на
+# длине волны канала λ оно пересчитывается как C·(λ/λ_ref)². По умолчанию
+# λ_ref = 2π мкм: тогда абсцисса таблицы x = 2πr/λ_ref численно равна радиусу r
+# (в мкм). Переопределяется флагом --table-ref-lambda-um.
+TABLE_REF_WL_UM = 2.0 * np.pi
+
 
 def set_mie_jit(use_jit: bool) -> bool:
     """Переключить Mie-бэкенд miepython в рантайме.
@@ -85,18 +92,24 @@ class Channel:
 
     При ``table`` не None ядро берётся из внешней таблицы сечений
     (``TabularCrossSection``) вместо расчёта Mie: таблица содержит сечения
-    в мкм² как функцию безразмерного параметра размера x = 2πr/λ, поэтому
-    показатель преломления m в расчёте ядра не участвует.
+    в мкм² как функцию безразмерного параметра размера x = 2πr/λ, снятые при
+    эталонной длине волны ``table_ref_wl_um`` (по умолчанию 2π мкм), поэтому
+    показатель преломления m в расчёте ядра не участвует. Поскольку сечение
+    ∝ λ², при использовании на длине волны канала оно домножается на
+    (λ/λ_ref)².
     """
 
-    __slots__ = ("kind", "wl_um", "table")
+    __slots__ = ("kind", "wl_um", "table", "table_ref_wl_um")
 
-    def __init__(self, kind: str, wl_um: float, table: "TabularCrossSection | None" = None) -> None:
+    def __init__(self, kind: str, wl_um: float,
+                 table: "TabularCrossSection | None" = None,
+                 table_ref_wl_um: float = TABLE_REF_WL_UM) -> None:
         if kind not in ("alpha", "beta"):
             raise ValueError(f"kind должен быть 'alpha' или 'beta', получено {kind!r}")
         self.kind = kind
         self.wl_um = float(wl_um)
         self.table = table
+        self.table_ref_wl_um = float(table_ref_wl_um)
 
     @property
     def name(self) -> str:
@@ -108,12 +121,14 @@ class Channel:
 
         Скорость определяется бэкендом miepython: с numba (по умолчанию —
         см. ``set_mie_jit``) примерно в 45 раз быстрее, чем на чистом Python.
-        При ``self.table`` не None используется табличное сечение (мкм² → м²).
+        При ``self.table`` не None используется табличное сечение, снятое при
+        эталонной λ_ref: C(x)·(λ/λ_ref)² (мкм² → м²).
         """
         r = np.asarray(r, dtype=float)
         x = 2.0 * np.pi * r / self.wl_um
         if self.table is not None:
-            return UM2_TO_M2 * self.table.cross_section(x)
+            C = self.table.cross_section(x)
+            return UM2_TO_M2 * C * (self.wl_um / self.table_ref_wl_um) ** 2
         qext, _qsca, qback, _g = mie.efficiencies_mx(m, x)
         if self.kind == "alpha":
             return UM2_TO_M2 * np.pi * r * r * qext
@@ -131,8 +146,9 @@ class TabularCrossSection:
     пределы таблицы по умолчанию выбрасывается ошибка; при
     ``extrapolate=True`` — экстраполяция граничной кривой с предупреждением.
 
-    Единицы: C в мкм²; перевод в м² (ядра) выполняется умножением на
-    ``UM2_TO_M2 = 1e-12`` (см. ``Channel.kernel``).
+    Единицы: C в мкм². Перевод в м² и пересчёт с эталонной длины волны таблицы
+    ``table_ref_wl_um`` на длину волны канала выполняются в ``Channel.kernel``
+    (``UM2_TO_M2 = 1e-12``, множитель ``(λ/λ_ref)²``).
     """
 
     __slots__ = ("x", "C", "x_min", "x_max", "_interp", "extrapolate", "_path")
@@ -204,30 +220,35 @@ class TabularCrossSection:
         return out
 
 
-def load_table_channels(root: str, m: complex, channels, extrapolate: bool = False):
+def load_table_channels(root: str, m: complex, channels,
+                        extrapolate: bool = False,
+                        ref_wl_um: float = TABLE_REF_WL_UM):
     """Загрузка таблиц сечений для показателя преломления ``m``.
 
-    Каталог: ``<root>/m{real:g}_i{imag:g}/``, файлы ``Cext_<нм>.txt``
-    (ослабление) и ``Cback_<нм>.txt`` (обратное рассеяние), где ``<нм>`` —
-    длина волны канала в нанометрах. Возвращает (channels_tbl, r_max_cap)
-    — каналы с табличными ядрами и ограничение сверху по радиусу (мкм),
-    определяемое покрытием таблиц по x (минимум по каналам:
+    Каталог: ``<root>/m{real:g}_i{imag:g}/``, файлы ``Cext.txt`` (ослабление)
+    и ``Cback.txt`` (обратное рассеяние) — по одной таблице на каждое
+    ``(m, вид)``; таблица универсальна по ``x`` и снята при эталонной длине
+    волны ``ref_wl_um``, поэтому одна и та же таблица используется всеми
+    каналами (сечение пересчитывается как ``(λ/λ_ref)²``). Возвращает
+    (channels_tbl, r_max_cap) — каналы с табличными ядрами и ограничение сверху
+    по радиусу (мкм), определяемое покрытием таблиц по x (минимум по каналам:
     r_max = x_max·λ/(2π)).
     """
     mdir = os.path.join(root, f"m{m.real:g}_i{m.imag:g}")
     if not os.path.isdir(mdir):
         raise FileNotFoundError(
             f"каталог таблиц не найден: {mdir} (создайте его с файлами "
-            f"Cext_<нм>.txt / Cback_<нм>.txt)")
+            f"Cext.txt / Cback.txt)")
     out = []
     caps = []
+    cache: dict[str, TabularCrossSection] = {}
     for ch in channels:
         prefix = "Cext" if ch.kind == "alpha" else "Cback"
-        wl_nm = int(round(ch.wl_um * 1e3))
-        path = os.path.join(mdir, f"{prefix}_{wl_nm}.txt")
-        tbl = TabularCrossSection.from_file(path, extrapolate=extrapolate)
-        new_ch = Channel(ch.kind, ch.wl_um, table=tbl)
-        out.append(new_ch)
+        if prefix not in cache:
+            cache[prefix] = TabularCrossSection.from_file(
+                os.path.join(mdir, f"{prefix}.txt"), extrapolate=extrapolate)
+        tbl = cache[prefix]
+        out.append(Channel(ch.kind, ch.wl_um, table=tbl, table_ref_wl_um=ref_wl_um))
         caps.append(tbl.x_max * ch.wl_um / (2.0 * np.pi))
     return out, float(min(caps))
 
