@@ -47,6 +47,15 @@ UM2_TO_M2 = 1e-12
 # (в мкм). Переопределяется флагом --table-ref-lambda-um.
 TABLE_REF_WL_UM = 2.0 * np.pi
 
+# Конвенции записи столбца Cback во внешних таблицах:
+#   "dsigma" — Cback = dσ/dΩ(180°) в мкм²/ср: так пишет mkbase из ADDA
+#              (s11(θ) = dσ/dΩ, проверено по ∫s11 dΩ = Csca) и так считает
+#              miepython (Cback = r²·qback/4), поэтому это единица по умолчанию;
+#   "4pi"    — Cback = 4π·dσ/dΩ («backscattering cross section» в конвенции
+#              Борена–Хаффмана): так пишут таблицы сфер mkbase_spheres/miedir
+#              (Cback = πx²·qback). Множитель ниже переводит запись к dσ/dΩ.
+CBACK_SCALES = {"dsigma": 1.0, "4pi": 1.0 / (4.0 * np.pi)}
+
 
 def set_mie_jit(use_jit: bool) -> bool:
     """Переключить Mie-бэкенд miepython в рантайме.
@@ -99,17 +108,20 @@ class Channel:
     (λ/λ_ref)².
     """
 
-    __slots__ = ("kind", "wl_um", "table", "table_ref_wl_um")
+    __slots__ = ("kind", "wl_um", "table", "table_ref_wl_um", "cback_scale")
 
     def __init__(self, kind: str, wl_um: float,
                  table: "TabularCrossSection | None" = None,
-                 table_ref_wl_um: float = TABLE_REF_WL_UM) -> None:
+                 table_ref_wl_um: float = TABLE_REF_WL_UM,
+                 cback_scale: float = 1.0) -> None:
         if kind not in ("alpha", "beta"):
             raise ValueError(f"kind должен быть 'alpha' или 'beta', получено {kind!r}")
         self.kind = kind
         self.wl_um = float(wl_um)
         self.table = table
         self.table_ref_wl_um = float(table_ref_wl_um)
+        # только для beta: перевод конвенции Cback таблицы к dσ/dΩ
+        self.cback_scale = float(cback_scale)
 
     @property
     def name(self) -> str:
@@ -128,7 +140,10 @@ class Channel:
         x = 2.0 * np.pi * r / self.wl_um
         if self.table is not None:
             C = self.table.cross_section(x)
-            return UM2_TO_M2 * C * (self.wl_um / self.table_ref_wl_um) ** 2
+            K = UM2_TO_M2 * C * (self.wl_um / self.table_ref_wl_um) ** 2
+            if self.kind == "beta":
+                K = K * self.cback_scale
+            return K
         qext, _qsca, qback, _g = mie.efficiencies_mx(m, x)
         if self.kind == "alpha":
             return UM2_TO_M2 * np.pi * r * r * qext
@@ -138,8 +153,12 @@ class Channel:
 class TabularCrossSection:
     """Внешняя таблица сечения: C(x) в мкм² на безразмерный параметр размера x.
 
-    Файл — два столбца ``x  C`` (комментарии ``#`` и пустые строки игнорируются),
-    x строго возрастает, C > 0. Интерполяция в логарифмических координатах
+    Источник — файл ``data.txt``, создаваемый ``mkbase`` / ``mkbase_spheres``:
+    заголовок ``# x Cext Cabs Cback Qext Qabs Qback [n]`` и строки с числовыми
+    столбцами. Сечение выбирается по имени колонки из заголовка (``Cext`` для
+    ослабления, ``Cback`` для обратного рассеяния), абсцисса — колонка ``x``;
+    остальные столбцы не используются. Комментарии ``#`` и пустые строки
+    игнорируются, x строго возрастает, C > 0. Интерполяция в логарифмических координатах
     (ln x, ln C) кубическим сплайном — как в ``KernelTable``; на осциллирующих
     факторах Mie кубический сплайн отслеживает рипл лучше shape-preserving
     методов (PCHIP "сглаживает" осцилляции между узлами). При выходе x за
@@ -183,27 +202,52 @@ class TabularCrossSection:
         self._interp = CubicSpline(np.log(x), np.log(C))
 
     @classmethod
-    def from_file(cls, path: str, extrapolate: bool = False) -> "TabularCrossSection":
-        """Загрузка из текстового файла ``x C`` (комментарии ``#`` разрешены)."""
-        xs, cs = [], []
+    def from_data_file(cls, path: str, column: str = "Cext",
+                       extrapolate: bool = False) -> "TabularCrossSection":
+        """Загрузка одного сечения из ``data.txt`` формата mkbase.
+
+        ``column`` — имя колонки в заголовке (``"Cext"`` или ``"Cback"``).
+        Заголовок — строка-комментарий, у которой первый токен после ``#``
+        равен ``x``, а нужное имя колонки присутствует как отдельный токен;
+        строки вроде ``# Units: ...`` (их пишет ``mkbase_spheres``) на
+        заголовок не претендуют, так как начинаются с ``Units:``. Столбцы
+        выбираются по имени, а не по позиции, поэтому лишние колонки
+        (``n`` в ``average/``) и их порядок значения не имеют.
+        """
         if not os.path.isfile(path):
             raise FileNotFoundError(
                 f"файл таблицы сечений не найден: {path}")
+        header: list[str] | None = None
+        rows: list[list[str]] = []
         with open(path, "r", encoding="utf-8") as fh:
             for ln in fh:
                 s = ln.strip()
-                if not s or s.startswith("#"):
+                if not s:
                     continue
-                toks = s.split()
-                if len(toks) < 2:
-                    raise ValueError(f"{path}: строка без двух чисел: {ln.rstrip()!r}")
-                xs.append(float(toks[0]))
-                cs.append(float(toks[1]))
+                if s.startswith("#"):
+                    toks = s.lstrip("#").split()
+                    if header is None and toks and toks[0] == "x" and column in toks:
+                        header = toks
+                    continue
+                rows.append(s.split())
+        if header is None:
+            raise ValueError(
+                f"{path}: не найден заголовок формата mkbase с колонками "
+                f"'x' и {column!r} (ожидается, например, "
+                f"'# x Cext Cabs Cback Qext Qabs Qback')")
+        ix = header.index("x")
+        ic = header.index(column)
+        xs, cs = [], []
+        for toks in rows:
+            if len(toks) <= max(ix, ic):
+                raise ValueError(
+                    f"{path}: в строке нет колонки {column!r}: {' '.join(toks)!r}")
+            xs.append(float(toks[ix]))
+            cs.append(float(toks[ic]))
         if len(xs) < 3:
             raise ValueError(f"{path}: недостаточно точек (>= 3), найдено {len(xs)}")
-        obj = cls(np.asarray(xs, float), np.asarray(cs, float),
-                  extrapolate=extrapolate, path=path)
-        return obj
+        return cls(np.asarray(xs, float), np.asarray(cs, float),
+                   extrapolate=extrapolate, path=path)
 
     def cross_section(self, x) -> np.ndarray:
         """Сечение C(x) в мкм² (интерполяция в log-log)."""
@@ -220,35 +264,149 @@ class TabularCrossSection:
         return out
 
 
+def m_table_dirname(m: complex) -> str:
+    """Имя каталога таблиц для ``m`` в формате mkbase.
+
+    ``mre_<real:.2f>_mim_<imag:.5f>`` — как пишут ``mkbase`` и
+    ``mkbase_spheres``. Отрицательный ноль нормализуется, иначе ``mim_0.00000``
+    превратился бы в ``mim_-0.00000``.
+    """
+    re = float(m.real) + 0.0
+    im = float(m.imag) + 0.0
+    return f"mre_{re:.2f}_mim_{im:.5f}"
+
+
+def _parse_m_dirname(name: str) -> "complex | None":
+    """Разбор имени ``mre_<real>_mim_<imag>``; None, если формат другой."""
+    if not name.startswith("mre_") or "_mim_" not in name:
+        return None
+    re_s, _, im_s = name[len("mre_"):].partition("_mim_")
+    try:
+        return complex(float(re_s), float(im_s))
+    except ValueError:
+        return None
+
+
+def _m_values_str(values, limit: int = 10) -> str:
+    """Список m в виде ``1.45+0.0168j, ...`` для сообщений."""
+    parts = [f"{z.real:g}{z.imag:+g}j" for z in values[:limit]]
+    if len(values) > limit:
+        parts.append("...")
+    return ", ".join(parts)
+
+
+def _layout_hint(root: str) -> str:
+    """Подсказка, если вместо каталога с m указан корень базы (``base/``)."""
+    if not os.path.isdir(root):
+        return f"; каталог {root} отсутствует"
+    nested = sorted(
+        e for e in os.listdir(root)
+        if os.path.isdir(os.path.join(root, e))
+        and (e == "average" or (e.startswith("shape") and e[5:].isdigit())))
+    if not nested:
+        return ""
+    return (f"; {root} содержит {', '.join(nested)} — укажите "
+            f"--tables {os.path.join(root, 'average')} или "
+            f"--tables <root>/<shapeNN>")
+
+
+def available_m_values(root: str) -> "list[complex]":
+    """Значения m, для которых в таблицах есть готовый ``data.txt``.
+
+    Сканирует подкаталоги ``mre_<real:.2f>_mim_<imag:.5f>`` в ``root``
+    (например ``base/average`` или ``base/shapeNN``) и возвращает их m,
+    отсортированные по (Re, Im). Каталоги без ``data.txt`` игнорируются.
+    """
+    if not os.path.isdir(root):
+        raise FileNotFoundError(f"каталог таблиц не найден: {root}")
+    values = []
+    for name in os.listdir(root):
+        mv = _parse_m_dirname(name)
+        if mv is None:
+            continue
+        if os.path.isfile(os.path.join(root, name, "data.txt")):
+            values.append(mv)
+    return sorted(set(values), key=lambda z: (z.real, z.imag))
+
+
+def table_m_grid(root: str, m_reals=None, m_imags=None) -> "list[complex]":
+    """Сетка m для перебора — только значения, для которых есть таблицы.
+
+    Базовый набор — все ``m`` из ``available_m_values(root)``. Если заданы
+    ``m_reals`` / ``m_imags``, набор сужается по Re / Im; сравнение идёт по
+    тому же округлению, с которым формируются имена каталогов (2 и 5 знаков),
+    т.е. согласовано с ``m_table_dirname``. Пустой результат — ошибка с
+    перечнем доступных m.
+    """
+    available = available_m_values(root)
+    if not available:
+        raise FileNotFoundError(
+            f"в каталоге таблиц {root} нет ни одного подкаталога "
+            f"mre_<real>_mim_<imag>/data.txt" + _layout_hint(root))
+    grid = available
+    if m_reals is not None:
+        keys = {f"{float(v):.2f}" for v in m_reals}
+        grid = [z for z in grid if f"{z.real:.2f}" in keys]
+    if m_imags is not None:
+        keys = {f"{float(v):.5f}" for v in m_imags}
+        grid = [z for z in grid if f"{z.imag:.5f}" in keys]
+    if not grid:
+        raise FileNotFoundError(
+            f"в таблицах {root} нет m, удовлетворяющих --m-reals/--m-imags; "
+            f"доступные m: {_m_values_str(available)}")
+    return sorted(set(grid), key=lambda z: (z.real, z.imag))
+
+
+def _missing_table_error(root: str, mdir: str, m: complex) -> FileNotFoundError:
+    """Ошибка с диагностикой: какие m есть и куда указывать ``--tables``."""
+    msg = (f"каталог таблиц не найден: {mdir} (ожидается "
+           f"{m_table_dirname(m)}/data.txt — формат mkbase/mkbase_spheres)")
+    if not os.path.isdir(root):
+        return FileNotFoundError(f"{msg}{_layout_hint(root)}")
+    available = available_m_values(root)
+    if available:
+        msg += f"; доступные m в {root}: {_m_values_str(available)}"
+    else:
+        msg += _layout_hint(root)
+    return FileNotFoundError(msg)
+
+
 def load_table_channels(root: str, m: complex, channels,
                         extrapolate: bool = False,
-                        ref_wl_um: float = TABLE_REF_WL_UM):
+                        ref_wl_um: float = TABLE_REF_WL_UM,
+                        cback_scale: float = 1.0):
     """Загрузка таблиц сечений для показателя преломления ``m``.
 
-    Каталог: ``<root>/m{real:g}_i{imag:g}/``, файлы ``Cext.txt`` (ослабление)
-    и ``Cback.txt`` (обратное рассеяние) — по одной таблице на каждое
-    ``(m, вид)``; таблица универсальна по ``x`` и снята при эталонной длине
-    волны ``ref_wl_um``, поэтому одна и та же таблица используется всеми
-    каналами (сечение пересчитывается как ``(λ/λ_ref)²``). Возвращает
-    (channels_tbl, r_max_cap) — каналы с табличными ядрами и ограничение сверху
-    по радиусу (мкм), определяемое покрытием таблиц по x (минимум по каналам:
+    ``root`` — каталог с подкаталогами ``mre_<real:.2f>_mim_<imag:.5f>/``
+    (например ``base/average`` или ``base/shapeNN``), в каждом — ``data.txt``
+    формата ``mkbase`` / ``mkbase_spheres`` с колонками
+    ``x Cext Cabs Cback Qext Qabs Qback [n]``. Из него берутся ``Cext``
+    (ослабление) и ``Cback`` (обратное рассеяние) — по одной таблице на
+    ``(m, вид)``, общая для всех длин волн каналов. Таблица универсальна по
+    ``x`` и снята при эталонной длине волны ``ref_wl_um``, поэтому сечение
+    пересчитывается как ``(λ/λ_ref)²``. ``cback_scale`` переводит конвенцию
+    столбца ``Cback`` к ``dσ/dΩ`` (см. ``CBACK_SCALES``); для каналов alpha
+    не применяется. Возвращает (channels_tbl, r_max_cap) —
+    каналы с табличными ядрами и ограничение сверху по радиусу (мкм),
+    определяемое покрытием таблиц по x (минимум по каналам:
     r_max = x_max·λ/(2π)).
     """
-    mdir = os.path.join(root, f"m{m.real:g}_i{m.imag:g}")
-    if not os.path.isdir(mdir):
-        raise FileNotFoundError(
-            f"каталог таблиц не найден: {mdir} (создайте его с файлами "
-            f"Cext.txt / Cback.txt)")
+    mdir = os.path.join(root, m_table_dirname(m))
+    path = os.path.join(mdir, "data.txt")
+    if not os.path.isfile(path):
+        raise _missing_table_error(root, mdir, m)
     out = []
     caps = []
     cache: dict[str, TabularCrossSection] = {}
     for ch in channels:
-        prefix = "Cext" if ch.kind == "alpha" else "Cback"
-        if prefix not in cache:
-            cache[prefix] = TabularCrossSection.from_file(
-                os.path.join(mdir, f"{prefix}.txt"), extrapolate=extrapolate)
-        tbl = cache[prefix]
-        out.append(Channel(ch.kind, ch.wl_um, table=tbl, table_ref_wl_um=ref_wl_um))
+        column = "Cext" if ch.kind == "alpha" else "Cback"
+        if column not in cache:
+            cache[column] = TabularCrossSection.from_data_file(
+                path, column, extrapolate=extrapolate)
+        tbl = cache[column]
+        out.append(Channel(ch.kind, ch.wl_um, table=tbl,
+                           table_ref_wl_um=ref_wl_um,
+                           cback_scale=cback_scale if ch.kind == "beta" else 1.0))
         caps.append(tbl.x_max * ch.wl_um / (2.0 * np.pi))
     return out, float(min(caps))
 

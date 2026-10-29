@@ -44,6 +44,7 @@ def _args(**overrides) -> argparse.Namespace:
         m_real=1.45, m_imag=-0.005,
         m_reals=None, m_imags=None,
         tables=None, table_extrapolate=False,
+        table_ref_lambda_um=2.0 * np.pi, table_cback="dsigma",
         noise=0.0, seed=1, out="result.png", json=None, no_plot=True,
         lidar_ratio_cons=False, lidar_ratio_w=0.5, lidar_ratio_iter=3,
     )

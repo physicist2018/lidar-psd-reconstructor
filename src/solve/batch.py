@@ -46,11 +46,13 @@ import numpy as np
 from .basis import quadrature_grid
 from .inverse import ensemble_average, scan_variants
 from .kernels import (
+    CBACK_SCALES,
     Channel,
     KernelTable,
     dvol_dlnr_factor,
     load_table_channels,
     mie_jit_enabled,
+    table_m_grid,
 )
 
 CM3_PER_M3 = 1e6
@@ -116,18 +118,27 @@ def parse_batch_txt(path: str):
 
 
 def _m_grid_from_args(args):
-    """Декартово произведение сетки Re(m)×Im(m) (едино для всех высот)."""
+    """Сетка m для перебора (единая для всех высот).
+
+    В табличном режиме (``args.tables``) — только значения, для которых есть
+    таблицы; ``--m-reals`` / ``--m-imags`` (если заданы) сужают этот набор.
+    """
+    if args.tables is not None:
+        return table_m_grid(args.tables, args.m_reals, args.m_imags)
+
     def sort_vals(vals):
         return sorted(set(float(v) for v in vals))
 
     if args.m_reals is not None:
         m_reals = sort_vals(args.m_reals)
     else:
-        m_reals = sort_vals(args.m_real * f for f in (0.95, 1.0, 1.05))
+        m_real = 1.45 if args.m_real is None else args.m_real
+        m_reals = sort_vals(m_real * f for f in (0.95, 1.0, 1.05))
     if args.m_imags is not None:
         m_imags = sort_vals(args.m_imags)
     else:
-        mi = -abs(args.m_imag)
+        m_imag = -0.005 if args.m_imag is None else args.m_imag
+        mi = -abs(m_imag)
         m_imags = sort_vals([mi, mi / 2.0, 0.0])
     return [complex(re_, im_) for re_ in m_reals for im_ in m_imags]
 
@@ -148,7 +159,8 @@ def _build_kernel_tables(args, channels, m_grid):
         for mv in m_grid:
             _chs, cap = load_table_channels(args.tables, mv, solve_channels,
                                             args.table_extrapolate,
-                                            ref_wl_um=args.table_ref_lambda_um)
+                                            ref_wl_um=args.table_ref_lambda_um,
+                                            cback_scale=CBACK_SCALES[args.table_cback])
             caps.append(cap)
         r1_max_eff = min(args.r1_max, float(min(caps)))
         if r1_max_eff < args.r1_min:
@@ -158,9 +170,11 @@ def _build_kernel_tables(args, channels, m_grid):
         print(f"табличный режим ядер (внешние сечения), корень: {args.tables}")
         print(f"  λ_ref таблиц = {args.table_ref_lambda_um:g} мкм "
               f"(сечения пересчитываются как (λ/λ_ref)²)")
+        print(f"  конвенция Cback = {args.table_cback}")
         _chs0, _ = load_table_channels(args.tables, m_grid[0], solve_channels,
                                        args.table_extrapolate,
-                                       ref_wl_um=args.table_ref_lambda_um)
+                                       ref_wl_um=args.table_ref_lambda_um,
+                                       cback_scale=CBACK_SCALES[args.table_cback])
         for ch in _chs0:
             print(f"  {ch.name:<14} x_max = {ch.table.x_max:g}, "
                   f"r_max = {ch.table.x_max * ch.wl_um / (2 * np.pi):.3g} мкм")
@@ -177,7 +191,8 @@ def _build_kernel_tables(args, channels, m_grid):
         if args.tables is not None:
             chs_tbl, _ = load_table_channels(args.tables, mv, solve_channels,
                                              args.table_extrapolate,
-                                             ref_wl_um=args.table_ref_lambda_um)
+                                             ref_wl_um=args.table_ref_lambda_um,
+                                             cback_scale=CBACK_SCALES[args.table_cback])
             tables[mv] = KernelTable(mv, chs_tbl, args.r0_min, r1_max_eff,
                                      dx_max=args.dx_max)
         else:
