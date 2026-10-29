@@ -12,3 +12,7 @@ wheels/
 # Генерируемые артефакты программы
 result.png
 result_*.json
+mie_Cext_Cback.png
+
+# База сечений (mkbase)
+base/

@@ -40,7 +40,16 @@ import numpy as np
 
 from .basis import quadrature_grid
 from .inverse import ensemble_average, scan_variants
-from .kernels import Channel, KernelTable, dvol_dlnr_factor, mie_jit_enabled, set_mie_jit
+from .kernels import (
+    CBACK_SCALES,
+    Channel,
+    KernelTable,
+    dvol_dlnr_factor,
+    load_table_channels,
+    mie_jit_enabled,
+    set_mie_jit,
+    table_m_grid,
+)
 
 __all__ = [
     "Channel", "KernelTable", "scan_variants", "ensemble_average",
@@ -51,6 +60,10 @@ __all__ = [
 
 DEMO_BETA_WL_NM = (355, 532, 1064)
 DEMO_ALPHA_WL_NM = (355, 532)
+# «Истинный» m демонстрации по умолчанию (используется, если не заданы
+# --m-real / --m-imag). В табличном режиме вместо него берётся ближайший m,
+# для которого посчитаны таблицы.
+DEMO_M_DEFAULT = 1.45 - 0.005j
 # Примечание: в исходном задании указаны обратное рассеяние 533/532/1064 нм
 # и ослабление 355/532 нм.  "533" здесь трактуется как опечатка для 355 нм
 # (стандартный набор трёхволнового лидара 355/532/1064).
@@ -386,10 +399,10 @@ def demo_true_distribution(r, fine: tuple = DEMO_FINE,
     return lognormal_volume(r, *fine) + lognormal_volume(r, *coarse)
 
 
-def _demo_measurements(args, channels, kernels: KernelTable):
+def _demo_measurements(args, channels, kernels: KernelTable, r1_max: float):
     """Измеренные коэффициенты для демонстрации (с опциональным шумом)."""
     g1 = forward_measurements(channels, kernels, demo_true_distribution,
-                              args.r0_min, args.r1_max)
+                              args.r0_min, r1_max)
     if args.noise > 0:
         rng = np.random.default_rng(args.seed)
         g1 = g1 * (1.0 + rng.normal(0.0, args.noise, size=g1.size))
@@ -541,6 +554,25 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--data", metavar="JSON", default=None,
                    help="файл с измеренными коэффициентами (см. README); "
                         "без него запускается демонстрация на синтетических данных")
+    p.add_argument("--tables", metavar="DIR", default=None,
+                   help="табличный режим ядер: каталог с подкаталогами "
+                        "mre_<real>_mim_<imag>/ (например base/average или "
+                        "base/shapeNN), внутри — data.txt формата mkbase "
+                        "(колонки x Cext Cabs Cback ...; сечения в мкм², "
+                        "снятые при λ_ref = 2π мкм); "
+                        "по умолчанию — ядра Mie через miepython")
+    p.add_argument("--table-extrapolate", action="store_true",
+                   help="разрешить экстраполяцию сечения за пределы диапазона x "
+                        "в табличном режиме (по умолчанию — ошибка)")
+    p.add_argument("--table-ref-lambda-um", type=float, default=2.0 * np.pi,
+                   help="длина волны (мкм), при которой посчитаны внешние "
+                        "таблицы сечений; сечение пересчитывается на длину волны "
+                        "канала как (λ/λ_ref)² [2π]")
+    p.add_argument("--table-cback", choices=sorted(CBACK_SCALES),
+                   default="dsigma",
+                   help="конвенция столбца Cback во внешних таблицах: "
+                        "dsigma — Cback = dσ/dΩ(180°) (mkbase/ADDA, miepython), "
+                        "4pi — Cback = 4π·dσ/dΩ (mkbase_spheres/miedir) [dsigma]")
     p.add_argument("--batch", metavar="TXT", default=None,
                    help="пакетная обработка: txt-файл со столбцами "
                         "Altitude b<нм>... a<нм>... (по строке на высоту); "
@@ -601,10 +633,12 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="порядок Гаусса–Лежандра на подсегменте [24]")
     p.add_argument("--log-span", type=float, default=0.1,
                    help="макс. ширина подсегмента в ln r [0.1]")
-    p.add_argument("--m-real", type=float, default=1.45,
-                   help="Re(m) истинного распределения для демо [1.45]")
-    p.add_argument("--m-imag", type=float, default=-0.005,
-                   help="Im(m) истинного распределения для демо [-0.005]")
+    p.add_argument("--m-real", type=float, default=None,
+                   help="Re(m) истинного распределения для демо [1.45; в табличном "
+                        "режиме — ближайший m из таблиц]")
+    p.add_argument("--m-imag", type=float, default=None,
+                   help="Im(m) истинного распределения для демо [-0.005; в табличном "
+                        "режиме — ближайший m из таблиц]")
     p.add_argument("--lidar-ratio-cons", action="store_true",
                    help="ограничить плавность лидарного отношения S = α/β с высотой: "
                         "переранжирование решений по отклонению от сглаженного по "
@@ -616,9 +650,13 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="макс. число итераций уточнения опорного профиля лидарного "
                         "отношения [3]")
     p.add_argument("--m-reals", nargs="+", type=float, default=None,
-                   help="сетка Re(m) для перебора [демо: 1.40 1.45 1.50; данные: сетка вокруг m из файла]")
+                   help="сетка Re(m) для перебора [демо: 1.40 1.45 1.50; данные: сетка "
+                        "вокруг m из файла; в табличном режиме — только значения, "
+                        "для которых есть таблицы (флаг сужает набор)]")
     p.add_argument("--m-imags", nargs="+", type=float, default=None,
-                   help="сетка Im(m) для перебора [демо: -0.01 -0.005 0; данные: вокруг m из файла]")
+                   help="сетка Im(m) для перебора [демо: -0.01 -0.005 0; данные: вокруг "
+                        "m из файла; в табличном режиме — только значения, для "
+                        "которых есть таблицы (флаг сужает набор)]")
     p.add_argument("--noise", type=float, default=0.0,
                    help="относительный шум на демонстрационные g1 [0]")
     p.add_argument("--seed", type=int, default=1, help="зерно генератора шума [1]")
@@ -628,6 +666,36 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="сохранить результаты в JSON")
     p.add_argument("--no-plot", action="store_true", help="не строить график")
     return p.parse_args(argv)
+
+
+def _resolve_demo_m(target: complex, grid, fixed_real, fixed_imag) -> complex:
+    """Истинный m демо в табличном режиме — из табличных значений.
+
+    Если заданы и ``--m-real``, и ``--m-imag``, значение должно быть в сетке
+    перебора (иначе ошибка). Если задан только один компонент — второй
+    выбирается из таблиц; если ни одного — берётся ближайший к умочанию
+    ``DEMO_M_DEFAULT`` среди табличных m. При замене печатается пояснение.
+    """
+    cand = list(grid)
+    if fixed_real is not None:
+        key = f"{float(fixed_real):.2f}"
+        cand = [z for z in cand if f"{z.real:.2f}" == key]
+    if fixed_imag is not None:
+        key = f"{float(fixed_imag):.5f}"
+        cand = [z for z in cand if f"{z.imag:.5f}" == key]
+    if not cand:
+        listing = ", ".join(f"{z.real:g}{z.imag:+g}j" for z in grid)
+        raise SystemExit(
+            f"истинный m демо = {target.real:g}{target.imag:+g}j отсутствует "
+            f"в табличной сетке m: {listing} — задайте --m-real/--m-imag "
+            f"из этого списка")
+    best = min(cand, key=lambda z: (abs(z.real - target.real),
+                                    abs(z.imag - target.imag)))
+    if best != target:
+        print(f"[табличный режим] истинный m демо: используется "
+              f"{best.real:g}{best.imag:+g}j (ближайший к "
+              f"{target.real:g}{target.imag:+g}j из таблиц)")
+    return best
 
 
 def main(argv=None) -> None:
@@ -646,7 +714,10 @@ def main(argv=None) -> None:
 
     if args.batch is not None:
         from .batch import run_batch
-        run_batch(args)
+        try:
+            run_batch(args)
+        except FileNotFoundError as exc:
+            raise SystemExit(f"ошибка таблиц: {exc}") from None
         return
 
     degrees = sorted(set(args.degree))
@@ -661,14 +732,15 @@ def main(argv=None) -> None:
         n_true = None
         print(f"данные: {args.data}; каналов: {len(channels)}")
     else:
-        m = complex(args.m_real, args.m_imag)
+        m = complex(DEMO_M_DEFAULT.real if args.m_real is None else args.m_real,
+                    DEMO_M_DEFAULT.imag if args.m_imag is None else args.m_imag)
         channels = (
             [Channel("beta", wl_nm * 1e-3) for wl_nm in DEMO_BETA_WL_NM]
             + [Channel("alpha", wl_nm * 1e-3) for wl_nm in DEMO_ALPHA_WL_NM]
         )
         n_true = demo_true_distribution
         g1 = np.zeros(0)  # будет вычислено ниже (демо)
-        print("демонстрация на синтетических данных, m =", m)
+        print("демонстрация на синтетических данных")
     for ch in channels:
         print(f"  канал: {ch.name}")
     print("входные единицы: β [1/(м·ср)], α [1/м]")
@@ -682,50 +754,111 @@ def main(argv=None) -> None:
         print(f"базисных функций на окно: {nb} (с ГУ неизвестных: {nb - 2})")
     else:
         print(f"базисных функций на окно: {nb}")
-    print(f"показатель преломления m (исходный/истинный) = {m.real:g} {m.imag:+g}j")
 
     # ---- сетка показателя преломления для перебора ----
-    if args.m_reals is None or args.m_imags is None:
-        if args.data is not None:
-            mi = -abs(m.imag)
-            m_reals = [m.real * f for f in (0.95, 1.0, 1.05)]
-            m_imags = [mi, mi / 2.0, 0.0]
-        else:
-            m_reals = [1.40, 1.45, 1.50]
-            m_imags = [-0.01, -0.005, 0.0]
-        m_reals = sorted(set(m_reals))
-        m_imags = sorted(set(m_imags))
+    if args.tables is not None:
+        # табличный режим: перебираем только m, для которых есть таблицы;
+        # --m-reals / --m-imags (если заданы) лишь сужают этот набор
+        try:
+            m_grid = table_m_grid(args.tables, args.m_reals, args.m_imags)
+        except FileNotFoundError as exc:
+            raise SystemExit(f"ошибка таблиц: {exc}") from None
     else:
-        m_reals = sorted(set(args.m_reals))
-        m_imags = sorted(set(args.m_imags))
-    m_grid = [complex(re_, im_) for re_ in m_reals for im_ in m_imags]
+        if args.m_reals is None or args.m_imags is None:
+            if args.data is not None:
+                mi = -abs(m.imag)
+                m_reals = [m.real * f for f in (0.95, 1.0, 1.05)]
+                m_imags = [mi, mi / 2.0, 0.0]
+            else:
+                m_reals = [1.40, 1.45, 1.50]
+                m_imags = [-0.01, -0.005, 0.0]
+            m_reals = sorted(set(m_reals))
+            m_imags = sorted(set(m_imags))
+        else:
+            m_reals = sorted(set(args.m_reals))
+            m_imags = sorted(set(args.m_imags))
+        m_grid = [complex(re_, im_) for re_ in m_reals for im_ in m_imags]
     if not m_grid:
         raise SystemExit("сетка показателя преломления пуста")
+
+    if args.data is None and args.tables is not None:
+        m = _resolve_demo_m(m, m_grid, args.m_real, args.m_imag)
+
+    print(f"показатель преломления m (исходный/истинный) = {m.real:g} {m.imag:+g}j")
     print("сетка показателя преломления (перебор):")
     for mv in m_grid:
         print(f"  m = {mv.real:.3f}{mv.imag:+.3f}j")
 
-    print(f"строим таблицы ядер Mie ({len(m_grid)} значений m, miepython)...")
-    print(f"  Mie-бэкенд: {'numba (JIT)' if mie_jit_enabled() else 'чистый Python'}")
-    tables: dict = {}
-    for mv in m_grid:
-        tables[mv] = KernelTable(mv, channels, args.r0_min, args.r1_max,
-                                 dx_max=args.dx_max)
-    n_pts = tables[m_grid[0]].r.size
-    print(f"  таблица: {n_pts} точек по r на каждое m")
+    try:
+        print(f"строим таблицы ядер ({len(m_grid)} значений m)...")
+        if args.tables is None:
+            r1_max_eff = args.r1_max
+            print(f"  Mie-бэкенд: {'numba (JIT)' if mie_jit_enabled() else 'чистый Python'}")
+        else:
+            # табличный режим: покрытие по x ограничивает верхнюю границу окон
+            caps = []
+            for mv in m_grid:
+                _chs, cap = load_table_channels(args.tables, mv, channels,
+                                                args.table_extrapolate,
+                                                ref_wl_um=args.table_ref_lambda_um,
+                                                cback_scale=CBACK_SCALES[args.table_cback])
+                caps.append(cap)
+            r1_cap = float(min(caps))
+            r1_max_eff = min(args.r1_max, r1_cap)
+            if r1_max_eff < args.r1_min:
+                raise SystemExit(
+                    f"покрытие таблиц по x ограничивает r1_max = {r1_max_eff:g} мкм < "
+                    f"r1_min = {args.r1_min:g} — расширьте таблицы или уменьшите --r1-min")
+            print(f"табличный режим ядер (внешние сечения), корень: {args.tables}")
+            print(f"  λ_ref таблиц = {args.table_ref_lambda_um:g} мкм "
+                  f"(сечения пересчитываются как (λ/λ_ref)²)")
+            print(f"  конвенция Cback = {args.table_cback}")
+            _chs0, _ = load_table_channels(args.tables, m_grid[0], channels,
+                                           args.table_extrapolate,
+                                           ref_wl_um=args.table_ref_lambda_um,
+                                           cback_scale=CBACK_SCALES[args.table_cback])
+            for ch in _chs0:
+                print(f"  {ch.name:<14} x_max = {ch.table.x_max:g}, "
+                      f"r_max = {ch.table.x_max * ch.wl_um / (2 * np.pi):.3g} мкм")
+            print(f"  эффективный r1_max = {r1_max_eff:g} мкм "
+                  f"(задан: {args.r1_max:g}) — окна и сетка r ограничены")
+        tables: dict = {}
+        for mv in m_grid:
+            if args.tables is not None:
+                chs_tbl, _ = load_table_channels(args.tables, mv, channels,
+                                                 args.table_extrapolate,
+                                                 ref_wl_um=args.table_ref_lambda_um,
+                                                 cback_scale=CBACK_SCALES[args.table_cback])
+                tables[mv] = KernelTable(mv, chs_tbl, args.r0_min, r1_max_eff,
+                                         dx_max=args.dx_max)
+            else:
+                tables[mv] = KernelTable(mv, channels, args.r0_min, r1_max_eff,
+                                         dx_max=args.dx_max)
+        n_pts = tables[m_grid[0]].r.size
+        print(f"  таблица: {n_pts} точек по r на каждое m")
+    except FileNotFoundError as exc:
+        raise SystemExit(f"ошибка таблиц: {exc}") from None
 
     if args.data is None:
         # таблица для «истинного» m демо (переиспользуем, если есть в сетке)
         true_kernels = tables.get(m)
         if true_kernels is None:
             print(f"  строим таблицу для истинного m демо: m = {m.real:g}{m.imag:+g}j")
-            true_kernels = KernelTable(m, channels, args.r0_min, args.r1_max,
-                                       dx_max=args.dx_max)
-        g1 = _demo_measurements(args, channels, true_kernels)
+            if args.tables is not None:
+                chs_tbl, _ = load_table_channels(args.tables, m, channels,
+                                                 args.table_extrapolate,
+                                                 ref_wl_um=args.table_ref_lambda_um,
+                                                 cback_scale=CBACK_SCALES[args.table_cback])
+                true_kernels = KernelTable(m, chs_tbl, args.r0_min, r1_max_eff,
+                                           dx_max=args.dx_max)
+            else:
+                true_kernels = KernelTable(m, channels, args.r0_min, r1_max_eff,
+                                           dx_max=args.dx_max)
+        g1 = _demo_measurements(args, channels, true_kernels, r1_max_eff)
         print("измеренные коэффициенты g1:", np.array2string(g1, precision=5))
 
     r0_grid = np.geomspace(args.r0_min, args.r0_max, args.nr0)
-    r1_grid = np.geomspace(args.r1_min, args.r1_max, args.nr1)
+    r1_grid = np.geomspace(args.r1_min, r1_max_eff, args.nr1)
 
     print("перебор (m, r0, r1, степень)...")
     try:
@@ -749,7 +882,7 @@ def main(argv=None) -> None:
         raise SystemExit("нет ни одного допустимого окна [r0, r1] — "
                          "проверьте границы и min-ratio")
 
-    r_grid = np.geomspace(args.r0_min, args.r1_max, 256)
+    r_grid = np.geomspace(args.r0_min, r1_max_eff, 256)
     n_avg, n_best, m_avg = ensemble_average(solutions, args.best, r_grid,
                                             smooth=not args.no_smooth,
                                             lam_rel=args.smooth_lam)
@@ -759,7 +892,7 @@ def main(argv=None) -> None:
     # расчётные g для усреднённых решения и показателя преломления:
     # ядра усредняются по G лучшим решениям (по их m), распределение —
     # объёмное F = dV/dln r, поэтому ядра умножаются на q(r) = 3/(4π r⁴)
-    r_q, w_q = quadrature_grid(np.array([args.r0_min, args.r1_max]),
+    r_q, w_q = quadrature_grid(np.array([args.r0_min, r1_max_eff]),
                                args.quad_order, args.log_span)
     n_q = np.interp(r_q, r_grid, np.nan_to_num(n_avg, nan=0.0))
     g_best = solutions[: max(1, min(args.best, len(solutions)))]
