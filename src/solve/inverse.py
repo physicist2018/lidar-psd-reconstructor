@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .basis import bspline_basis, design_matrix
+from .basis import window_geometry
 
 
 @dataclass
@@ -122,6 +122,254 @@ def cv_error(A: np.ndarray, g1: np.ndarray, gamma: float,
     return tot
 
 
+@dataclass(frozen=True)
+class Window:
+    """Окно [r0, r1] и степень базиса — идентификатор варианта перебора."""
+
+    degree: int
+    r0: float
+    r1: float
+
+
+class DesignSet:
+    """Предвычисленные матрицы ``A[m, окно]`` и их спектральные нормы.
+
+    Элемент ``A[j, i] = int K_j(r; m) q(r) B_i(r) dr`` не зависит от
+    измеренных коэффициентов, поэтому в пакетном режиме строится ОДИН раз
+    и переиспользуется для всех высот. Форма ``A`` —
+    ``(n_m, n_windows, n_channels, n_unknown)``; ``s0`` — те же первые две
+    оси со значением ‖A‖₂ (нужна для масштаба регуляризации).
+    """
+
+    __slots__ = ("channels", "m_values", "windows", "geometry", "n_basis",
+                 "zero_boundary", "order", "max_log_span", "A", "s0")
+
+    channels: list
+    m_values: list
+    windows: list
+    geometry: list
+    n_basis: int
+    zero_boundary: bool
+    order: int
+    max_log_span: float
+    A: np.ndarray
+    s0: np.ndarray
+
+    def __init__(self, channels, m_values, windows, geometry, A, s0, *,
+                 n_basis, zero_boundary, order, max_log_span):
+        self.channels = list(channels)
+        self.m_values = list(m_values)
+        self.windows = list(windows)
+        self.geometry = list(geometry)
+        self.A = A
+        self.s0 = s0
+        self.n_basis = int(n_basis)
+        self.zero_boundary = bool(zero_boundary)
+        self.order = int(order)
+        self.max_log_span = float(max_log_span)
+
+    @property
+    def n_unknown(self) -> int:
+        return int(self.A.shape[-1])
+
+    @property
+    def n_windows(self) -> int:
+        return len(self.windows)
+
+
+def build_design(channels, kernels_map: dict, degrees, r0_grid, r1_grid, *,
+                 min_ratio: float = 4.0,
+                 n_basis: int | None = None,
+                 zero_boundary: bool = True,
+                 order: int = 24, max_log_span: float = 0.1) -> DesignSet:
+    """Построить матрицы A для всех ``(m, degree, r0, r1)`` за один проход.
+
+    Геометрия окон (узлы/веса квадратуры, значения базиса) кэшируется и не
+    зависит от ``m``, поэтому базис строится один раз на окно, а не на
+    каждую пару ``(m, окно)``. Результат пригоден для многократного
+    решения по разным ``g1`` (высотам) через ``scan_variants(design=...)``.
+    """
+    channels = list(channels)
+    degrees = list(degrees)
+    if not degrees:
+        raise ValueError("список степеней пуст")
+    if n_basis is None:
+        n_basis = len(channels)
+    degree_max = max(degrees)
+    if n_basis < degree_max + 1:
+        raise ValueError(
+            f"n_basis ({n_basis}) < max(степень)+1 ({degree_max + 1}): "
+            f"уменьшите --degree или увеличьте --n-basis")
+    if zero_boundary and n_basis < 3:
+        raise ValueError("при нулевых граничных условиях нужно n_basis >= 3")
+
+    windows: list[Window] = []
+    for degree in degrees:
+        for r0 in r0_grid:
+            for r1 in r1_grid:
+                if r1 < min_ratio * r0:
+                    continue
+                windows.append(Window(int(degree), float(r0), float(r1)))
+    geometry = [
+        window_geometry(w.r0, w.r1, w.degree, n_basis,
+                        interior_only=zero_boundary,
+                        order=order, max_log_span=max_log_span)
+        for w in windows
+    ]
+
+    m_values = list(kernels_map)
+    n_unknown = n_basis - (2 if zero_boundary else 0)
+    A = np.empty((len(m_values), len(windows), len(channels), n_unknown))
+    for i_m, mv in enumerate(m_values):
+        table = kernels_map[mv]
+        for i_w, g in enumerate(geometry):
+            k = table.kernels(g.nodes)                # (n_channels, n_q)
+            A[i_m, i_w] = (k * g.dvol * g.weights) @ g.values
+    if windows:
+        s0 = np.linalg.svd(A, compute_uv=False)[..., 0]
+    else:
+        s0 = np.zeros(A.shape[:2])
+    return DesignSet(channels, m_values, windows, geometry, A, s0,
+                     n_basis=n_basis, zero_boundary=zero_boundary,
+                     order=order, max_log_span=max_log_span)
+
+
+def _batched_lstsq(aug: np.ndarray, rhs: np.ndarray) -> np.ndarray:
+    """Батчевый МНК через SVD — эквивалент ``np.linalg.lstsq(rcond=None)``.
+
+    ``aug`` — (..., m, n), ``rhs`` — (..., m); результат — (..., n).
+    Отсечка сингулярных чисел повторяет правило numpy (rcond=\u2009max(m,n)·eps),
+    поэтому решение совпадает с циклом ``np.linalg.lstsq`` до машинной точности.
+    """
+    u, s, vh = np.linalg.svd(aug, full_matrices=False)
+    cutoff = np.finfo(aug.dtype).eps * max(aug.shape[-2], aug.shape[-1])
+    keep = s > cutoff * s[..., :1]
+    s_inv = np.where(keep, 1.0 / np.where(keep, s, 1.0), 0.0)
+    ut_b = np.einsum("...ji,...j->...i", u, rhs)
+    return np.einsum("...ji,...j->...i", vh, s_inv * ut_b)
+
+
+def _weights_vector(g1n: np.ndarray, weights, relative: bool) -> np.ndarray:
+    """Веса строк МНК: 1/g1 (относительная невязка) или единицы."""
+    if weights is None:
+        return 1.0 / g1n if relative else np.ones_like(g1n)
+    return np.asarray(weights, dtype=float)
+
+
+def _solve_fixed_batched(design: DesignSet, g1n: np.ndarray, gamma: np.ndarray,
+                         weights: np.ndarray) -> np.ndarray:
+    """Батчевое решение расширенной системы для готовых ``gamma`` (n_m, n_w)."""
+    A = design.A
+    L = second_diff_matrix(design.n_unknown)
+    aw = A * weights[None, None, :, None]
+    aug = np.concatenate([aw, gamma[..., None, None] * L], axis=-2)
+    rhs = np.empty(aug.shape[:-1])
+    rhs[...] = np.concatenate([g1n * weights, np.zeros(L.shape[0])])
+    return _batched_lstsq(aug, rhs)
+
+
+def _residual_batched(design: DesignSet, c_norm: np.ndarray,
+                      g1n: np.ndarray) -> np.ndarray:
+    """Относительная невязка Err для батча решений (n_m, n_w)."""
+    g_fit = np.einsum("...jn,...n->...j", design.A, c_norm)
+    return np.sum(np.abs(g_fit - g1n) / g1n, axis=-1)
+
+
+def _select_gamma_batched(design: DesignSet, g1n: np.ndarray,
+                          gamma_rel: np.ndarray,
+                          weights: np.ndarray, gamma_select: str) -> np.ndarray:
+    """Выбор gamma по каждому (m, окну) без ограничения C >= 0.
+
+    "err" — батчево по всей сетке gamma; "cv" — пооконный LOO
+    (не батчируется, но матрицы A уже готовы)."""
+    s0 = design.s0
+    best_score = np.full(s0.shape, np.inf)
+    best_gamma = np.zeros_like(s0)
+    for gr in gamma_rel:
+        gamma = gr * s0
+        if gamma_select == "cv":
+            score = np.empty(s0.shape)
+            for i_m in range(s0.shape[0]):
+                for i_w in range(s0.shape[1]):
+                    score[i_m, i_w] = cv_error(
+                        design.A[i_m, i_w], g1n, gamma[i_m, i_w],
+                        weights=weights)
+        else:
+            c = _solve_fixed_batched(design, g1n, gamma, weights)
+            score = _residual_batched(design, c, g1n)
+        better = score < best_score
+        best_score = np.where(better, score, best_score)
+        best_gamma = np.where(better, gamma, best_gamma)
+    return best_gamma
+
+
+def _scan_batched(design: DesignSet, g1: np.ndarray, g1n: np.ndarray,
+                  scale: float, gamma_select: str, gamma_rel_fixed: float,
+                  gamma_exp_min: float, gamma_exp_max: float, n_gamma: int,
+                  weights: np.ndarray) -> list[Solution]:
+    """Перебор без ограничения C >= 0: решение для всех окон сразу."""
+    gamma: np.ndarray
+    if gamma_select == "fixed":
+        gamma = float(gamma_rel_fixed) * design.s0
+    else:
+        gamma_rel = 10.0 ** np.linspace(gamma_exp_min, gamma_exp_max, n_gamma)
+        gamma = _select_gamma_batched(design, g1n, gamma_rel, weights, gamma_select)
+    c_norm = _solve_fixed_batched(design, g1n, gamma, weights)
+    c_abs = c_norm * scale
+    g_fit = np.einsum("...jn,...n->...j", design.A, c_abs)
+    err = np.sum(np.abs(g_fit - g1) / g1, axis=-1)
+    out: list[Solution] = []
+    for i_m, m in enumerate(design.m_values):
+        for i_w, w in enumerate(design.windows):
+            out.append(Solution(
+                m=m, degree=w.degree, r0=w.r0, r1=w.r1,
+                gamma=float(gamma[i_m, i_w]),
+                C=c_abs[i_m, i_w].copy(),
+                basis=design.geometry[i_w].basis,
+                err=float(err[i_m, i_w]),
+                g_fit=g_fit[i_m, i_w].copy(),
+            ))
+    return out
+
+
+def _scan_nonneg(design: DesignSet, g1n: np.ndarray, scale: float,
+                 gamma_select: str, gamma_rel_fixed: float,
+                 gamma_exp_min: float, gamma_exp_max: float, n_gamma: int,
+                 weights: np.ndarray) -> list[Solution]:
+    """Перебор с ограничением C >= 0 (bounded МНК не батчируется)."""
+    gamma_rel = 10.0 ** np.linspace(gamma_exp_min, gamma_exp_max, n_gamma)
+    out: list[Solution] = []
+    for i_m, m in enumerate(design.m_values):
+        for i_w, w in enumerate(design.windows):
+            A = design.A[i_m, i_w]
+            s0 = float(design.s0[i_m, i_w])
+            if gamma_select == "fixed":
+                gamma = float(gamma_rel_fixed) * s0
+            else:
+                best = None
+                for gr in gamma_rel:
+                    gi = gr * s0
+                    if gamma_select == "cv":
+                        score = cv_error(A, g1n, gi, weights=weights, nonneg=True)
+                    else:
+                        c = solve_regularized(A, g1n, gi, weights=weights,
+                                              nonneg=True)
+                        score = residual_err(A, c, g1n)
+                    if best is None or score < best[0]:
+                        best = (score, gi)
+                assert best is not None, "сетка gamma пуста"
+                _score, gamma = best
+            c_norm = solve_regularized(A, g1n, gamma, weights=weights, nonneg=True)
+            err = residual_err(A, c_norm, g1n)
+            c_abs = c_norm * scale
+            out.append(Solution(
+                m=m, degree=w.degree, r0=w.r0, r1=w.r1, gamma=float(gamma),
+                C=c_abs, basis=design.geometry[i_w].basis, err=err,
+                g_fit=A @ c_abs,
+            ))
+    return out
+
+
 def scan_variants(channels, kernels_map: dict, g1: np.ndarray, degrees,
                   r0_grid, r1_grid, *,
                   min_ratio: float = 4.0,
@@ -134,7 +382,8 @@ def scan_variants(channels, kernels_map: dict, g1: np.ndarray, degrees,
                   gamma_rel_fixed: float | None = None,
                   zero_boundary: bool = True,
                   n_basis: int | None = None,
-                  order: int = 24, max_log_span: float = 0.1):
+                  order: int = 24, max_log_span: float = 0.1,
+                  design: DesignSet | None = None):
     """Перебор (показатель преломления m, r0, r1, степень) с выбором gamma.
 
     ``kernels_map`` — словарь {m: KernelTable} (таблицы ядер для каждого m
@@ -147,6 +396,12 @@ def scan_variants(channels, kernels_map: dict, g1: np.ndarray, degrees,
     функции: каждое решение удовлетворяет n(r0) = n(r1) = 0 (однородные
     граничные условия).
 
+    ``design`` — готовый ``DesignSet`` (матрицы A для всех ``(m, окно)``).
+    Если он задан, аргументы ``degrees``/``r0_grid``/``r1_grid``,
+    ``min_ratio``, ``n_basis``, ``zero_boundary``, ``order``,
+    ``max_log_span`` не используются: окна и матрицы берутся из ``design``.
+    Это позволяет в пакетном режиме строить A один раз на все высоты.
+
     ``gamma_select``:
       "fixed" — фиксированный gamma_rel (относительно ||A||_2).
       "cv"    — leave-one-out кросс-валидация по относительной невязке;
@@ -158,30 +413,21 @@ def scan_variants(channels, kernels_map: dict, g1: np.ndarray, degrees,
     """
     if gamma_select not in ("fixed", "cv", "err"):
         raise ValueError("gamma_select должен быть 'fixed', 'cv' или 'err'")
-    if gamma_select == "fixed" and gamma_rel_fixed is None:
-        gamma_rel_fixed = 0.1  # значение по умолчанию
+    gamma_rel_fixed_eff = 0.1 if gamma_rel_fixed is None else float(gamma_rel_fixed)
     g1 = np.asarray(g1, dtype=float)
     if np.any(g1 <= 0):
         raise ValueError("все измеренные коэффициенты g1 должны быть положительными")
     scale = float(g1.max())
     g1n = g1 / scale
-    if weights is None:
-        # веса 1/g1 — относительная невязка в согласии с Err
-        weights = 1.0 / g1n if relative else np.ones_like(g1n)
-    gamma_rel = 10.0 ** np.linspace(gamma_exp_min, gamma_exp_max, n_gamma)
+    # веса 1/g1 — относительная невязка в согласии с Err
+    weights = _weights_vector(g1n, weights, relative)
 
-    if not degrees:
-        raise ValueError("список степеней пуст")
-    if n_basis is None:
-        n_basis = len(channels)
-    degree_max = max(degrees)
-    if n_basis < degree_max + 1:
-        raise ValueError(
-            f"n_basis ({n_basis}) < max(степень)+1 ({degree_max + 1}): "
-            f"уменьшите --degree или увеличьте --n-basis")
-    if zero_boundary and n_basis < 3:
-        raise ValueError("при нулевых граничных условиях нужно n_basis >= 3")
-    n_unknown = n_basis - (2 if zero_boundary else 0)
+    if design is None:
+        design = build_design(channels, kernels_map, degrees, r0_grid, r1_grid,
+                              min_ratio=min_ratio, n_basis=n_basis,
+                              zero_boundary=zero_boundary,
+                              order=order, max_log_span=max_log_span)
+    n_unknown = design.n_unknown
     if n_unknown > len(channels):
         import warnings
         warnings.warn(
@@ -189,43 +435,17 @@ def scan_variants(channels, kernels_map: dict, g1: np.ndarray, degrees,
             f"решение опирается главным образом на регуляризацию "
             f"(система недоопределена)", stacklevel=2)
 
-    solutions: list[Solution] = []
-    for m, kernels in kernels_map.items():
-        for degree in degrees:
-            for r0 in r0_grid:
-                for r1 in r1_grid:
-                    if r1 < min_ratio * r0:
-                        continue
-                    basis, knots = bspline_basis(r0, r1, degree, n_basis,
-                                                  interior_only=zero_boundary)
-                    A = design_matrix(channels, kernels, basis, knots,
-                                      order=order, max_log_span=max_log_span)
-                    s0 = np.linalg.norm(A, 2)
-                    if gamma_select == "fixed":
-                        gamma = (gamma_rel_fixed if gamma_rel_fixed is not None else 0.1) * s0
-                    else:
-                        best = None
-                        for gamma_rel_i in gamma_rel:
-                            gamma_i = gamma_rel_i * s0
-                            if gamma_select == "cv":
-                                score = cv_error(A, g1n, gamma_i, weights=weights,
-                                                 nonneg=nonneg)
-                            else:
-                                c = solve_regularized(A, g1n, gamma_i,
-                                                      weights=weights, nonneg=nonneg)
-                                score = residual_err(A, c, g1n)
-                            if best is None or score < best[0]:
-                                best = (score, gamma_i)
-                        assert best is not None, "сетка gamma пуста"
-                        _score, gamma = best
-                    c_norm = solve_regularized(A, g1n, gamma, weights=weights,
-                                               nonneg=nonneg)
-                    err = residual_err(A, c_norm, g1n)
-                    c_abs = c_norm * scale
-                    solutions.append(Solution(
-                        m=m, degree=degree, r0=r0, r1=r1, gamma=gamma,
-                        C=c_abs, basis=basis, err=err, g_fit=A @ c_abs,
-                    ))
+    if design.n_windows == 0:
+        return [], scale
+
+    if nonneg:
+        solutions = _scan_nonneg(design, g1n, scale, gamma_select,
+                                 gamma_rel_fixed_eff, gamma_exp_min,
+                                 gamma_exp_max, n_gamma, weights)
+    else:
+        solutions = _scan_batched(design, g1, g1n, scale, gamma_select,
+                                  gamma_rel_fixed_eff, gamma_exp_min,
+                                  gamma_exp_max, n_gamma, weights)
 
     solutions.sort(key=lambda s: s.err)
     return solutions, scale

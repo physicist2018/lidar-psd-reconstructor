@@ -41,6 +41,7 @@ def _args(**overrides) -> argparse.Namespace:
         smooth_lam=1e-4, r_split=0.5, absolute=False,
         modes="auto",
         dx_max=0.1, no_jit=False, quad_order=24, log_span=0.1,
+        nr_out=256,
         m_real=1.45, m_imag=-0.005,
         m_reals=None, m_imags=None,
         tables=None, table_extrapolate=False,

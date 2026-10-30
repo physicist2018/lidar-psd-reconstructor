@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import lru_cache
 
 import numpy as np
@@ -99,6 +100,74 @@ def _quadrature_grid(breaks: tuple, order: int, max_log_span: float):
             nodes.append(x)
             weights.append(w)
     return np.concatenate(nodes), np.concatenate(weights)
+
+
+@dataclass(frozen=True, eq=False)
+class WindowGeometry:
+    """Кэшированная геометрия окна [r0, r1]: квадратура, базис и его значения.
+
+    Не зависит ни от показателя преломления ``m``, ни от измеренных
+    коэффициентов, поэтому строится один раз на окно и переиспользуется
+    для всех ``m`` и всех высот (в пакетном режиме). Поля массивов
+    доступны только для чтения — не мутируйте их.
+
+    ``values[i, k]`` — значение ``k``-й базисной функции в ``i``-м узле
+    квадратуры (форма (n_nodes, n_unknown)), ``dvol`` — пересчётный
+    множитель q(r) = 3/(4π r⁴) в тех же узлах.
+    """
+
+    degree: int
+    r0: float
+    r1: float
+    n_basis: int
+    interior_only: bool
+    knots: np.ndarray
+    nodes: np.ndarray
+    weights: np.ndarray
+    basis: tuple
+    values: np.ndarray
+    dvol: np.ndarray
+
+    @property
+    def n_unknown(self) -> int:
+        return int(self.values.shape[1])
+
+
+@lru_cache(maxsize=None)
+def window_geometry(r0: float, r1: float, degree: int, n_basis: int,
+                    interior_only: bool = False, order: int = 24,
+                    max_log_span: float = 0.1) -> WindowGeometry:
+    """Геометрия окна [r0, r1] для базиса из ``n_basis`` B-сплайнов степени
+    ``degree`` (кэш по параметрам окна).
+
+    Возвращает узлы/веса квадратуры Гаусса–Лежандра, значения базисных
+    функций в этих узлах (одним векторным вызовом ``BSpline`` — быстрее,
+    чем покомпонентный цикл), сами функции ``BSpline`` (разделяются между
+    всеми решениями этого окна) и пересчётный множитель dV/dln r.
+
+    При ``interior_only=True`` крайние базисные функции исключаются
+    (см. ``bspline_basis``) и ``n_unknown = n_basis - 2``.
+    """
+    if interior_only and n_basis < 3:
+        raise ValueError("граничные условия n(r0)=n(r1)=0 требуют n_basis >= 3")
+    knots = clamped_knots(r0, r1, degree, n_basis)
+    full = [BSpline(knots, e, degree, extrapolate=False) for e in np.eye(n_basis)]
+    nodes, weights = quadrature_grid(np.unique(knots), order, max_log_span)
+    # один векторный вызов вместо n_basis отдельных: (n_nodes, n_basis)
+    values = BSpline(knots, np.eye(n_basis), degree, extrapolate=False)(nodes)
+    if interior_only:
+        basis = tuple(full[1:-1])
+        values = values[:, 1:-1]
+    else:
+        basis = tuple(full)
+    dvol = dvol_dlnr_factor(nodes)
+    for arr in (knots, nodes, weights, values, dvol):
+        arr.flags.writeable = False
+    return WindowGeometry(
+        degree=int(degree), r0=float(r0), r1=float(r1), n_basis=int(n_basis),
+        interior_only=bool(interior_only), knots=knots,
+        nodes=nodes, weights=weights, basis=basis, values=values, dvol=dvol,
+    )
 
 
 def design_matrix(channels, kernels, basis, knots: np.ndarray,

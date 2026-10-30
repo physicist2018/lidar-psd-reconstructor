@@ -338,6 +338,54 @@ def test_volume_forward_consistency() -> None:
     assert np.allclose(A_plain, (k_vals * w_q) @ b_vals.T, rtol=1e-10)
 
 
+def test_design_set_matches_scan() -> None:
+    """Предвычисленные матрицы A (DesignSet) дают те же решения, что и
+    обычный перебор, и согласованы с design_matrix для каждого окна."""
+    from solve.basis import window_geometry
+    from solve.inverse import build_design
+
+    channels = make_channels()
+    kern = KernelTable(M, channels, 0.05, 5.0, dx_max=0.1)
+    g1 = forward_measurements(channels, kern, demo_true_distribution, 0.05, 5.0)
+    r0g = np.geomspace(0.05, 0.3, 3)
+    r1g = np.geomspace(2.0, 5.0, 2)
+    common: dict[str, Any] = dict(min_ratio=4.0, n_gamma=7, order=12,
+                                  max_log_span=0.2)
+
+    design = build_design(channels, {M: kern}, [1, 2], r0g, r1g,
+                          n_basis=5, zero_boundary=True, order=12,
+                          max_log_span=0.2)
+    # A из DesignSet совпадает с прямым design_matrix по каждому окну
+    for i_w, w in enumerate(design.windows):
+        basis, knots = bspline_basis(w.r0, w.r1, w.degree, 5, interior_only=True)
+        A_ref = design_matrix(channels, kern, basis, knots, order=12,
+                              max_log_span=0.2)
+        assert np.allclose(design.A[0, i_w], A_ref, rtol=1e-10, atol=0.0)
+        # геометрия окна: значения базиса в узлах квадратуры
+        g = window_geometry(w.r0, w.r1, w.degree, 5, interior_only=True,
+                            order=12, max_log_span=0.2)
+        assert g.values.shape == (g.nodes.size, 3)
+        assert np.allclose(g.values, np.array([b(g.nodes) for b in basis]).T,
+                           rtol=0, atol=0)
+
+    for gamma_select, grf in (("fixed", 0.1), ("err", None), ("cv", None)):
+        ref, _ = scan_variants(channels, {M: kern}, g1, [1, 2], r0g, r1g,
+                               n_basis=5, zero_boundary=True,
+                               gamma_select=gamma_select,
+                               gamma_rel_fixed=grf, **common)
+        via, _ = scan_variants(channels, {M: kern}, g1, [1, 2], r0g, r1g,
+                               n_basis=5, zero_boundary=True,
+                               gamma_select=gamma_select,
+                               gamma_rel_fixed=grf, design=design, **common)
+        assert len(ref) == len(via)
+        for s_ref, s_via in zip(ref, via):
+            assert (s_ref.m, s_ref.degree, s_ref.r0, s_ref.r1) == \
+                   (s_via.m, s_via.degree, s_via.r0, s_via.r1)
+            assert np.allclose(s_ref.C, s_via.C, rtol=1e-10, atol=0.0)
+            assert abs(s_ref.err - s_via.err) <= 1e-10 * max(abs(s_ref.err), 1.0)
+            assert abs(s_ref.gamma - s_via.gamma) <= 1e-10 * abs(s_ref.gamma)
+
+
 def test_weights_change_result() -> None:
     """Веса 1/g1 (относительные) меняют решение переопределённой системы."""
     rng = np.random.default_rng(0)

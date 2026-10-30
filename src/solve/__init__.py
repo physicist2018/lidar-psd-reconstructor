@@ -42,6 +42,7 @@ from .basis import quadrature_grid
 from .inverse import ensemble_average, scan_variants
 from .kernels import (
     CBACK_SCALES,
+    DEFAULT_DX_MAX,
     Channel,
     KernelTable,
     dvol_dlnr_factor,
@@ -623,8 +624,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "(моментная) оценка, auto — фит, при неудаче моменты [auto]")
     p.add_argument("--absolute", action="store_true",
                    help="МНК по абсолютным невязкам (по умолчанию веса 1/g1)")
-    p.add_argument("--dx-max", type=float, default=0.1,
+    p.add_argument("--dx-max", type=float, default=DEFAULT_DX_MAX,
                    help="шаг параметра размера x в таблице ядер [0.1]")
+    p.add_argument("--nr-out", metavar="N", type=int, default=256,
+                   help="число точек выходной сетки r для распределения [256]")
     p.add_argument("--no-jit", action="store_true",
                    help="отключить numba-бэкенд miepython: таблицы Mie-ядер "
                         "считаются чистым Python и работают заметно медленнее "
@@ -705,6 +708,8 @@ def main(argv=None) -> None:
         raise SystemExit("ошибка: --lidar-ratio-w должен быть >= 0")
     if args.lidar_ratio_iter < 1:
         raise SystemExit("ошибка: --lidar-ratio-iter должен быть >= 1")
+    if args.nr_out < 2:
+        raise SystemExit("ошибка: --nr-out должен быть >= 2")
     if args.lidar_ratio_cons and args.batch is None:
         print("[предупреждение] --lidar-ratio-cons действует только в пакетном "
               "режиме (--batch); игнорируется")
@@ -882,7 +887,7 @@ def main(argv=None) -> None:
         raise SystemExit("нет ни одного допустимого окна [r0, r1] — "
                          "проверьте границы и min-ratio")
 
-    r_grid = np.geomspace(args.r0_min, r1_max_eff, 256)
+    r_grid = np.geomspace(args.r0_min, r1_max_eff, args.nr_out)
     n_avg, n_best, m_avg = ensemble_average(solutions, args.best, r_grid,
                                             smooth=not args.no_smooth,
                                             lam_rel=args.smooth_lam)

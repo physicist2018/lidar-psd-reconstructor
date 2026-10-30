@@ -40,6 +40,12 @@ import miepython as mie
 # (1 мкм)^2 = 1e-12 м^2 — перевод сечения из мкм^2 в м^2
 UM2_TO_M2 = 1e-12
 
+# Шаг сетки по параметру размера x в таблице ядер (и соответствующий шаг
+# по r) — единый источник истины для умолчаний класса ``KernelTable`` и
+# флага CLI ``--dx-max``. Раньше значения расходились (0.05 в классе против
+# 0.1 в CLI), поэтому таблица ядер могла неожиданно вдвое густеть.
+DEFAULT_DX_MAX = 0.1
+
 # Эталонная длина волны внешних таблиц сечений (мкм). Таблица задаёт C(x) при
 # некоторой фиксированной λ_ref; поскольку сечение ∝ λ², при использовании на
 # длине волны канала λ оно пересчитывается как C·(λ/λ_ref)². По умолчанию
@@ -425,7 +431,7 @@ class KernelTable:
     """
 
     def __init__(self, m: complex, channels, r_min: float, r_max: float,
-                 dx_max: float = 0.05) -> None:
+                 dx_max: float = DEFAULT_DX_MAX) -> None:
         lam_min = min(ch.wl_um for ch in channels)
         dr = dx_max * lam_min / (2.0 * np.pi)
         r = np.arange(r_min, r_max, dr)
@@ -446,3 +452,13 @@ class KernelTable:
         """Значение ядра канала ``index`` в точках r (интерполяция)."""
         logr = np.log(np.clip(np.asarray(r, dtype=float), self.r_min, self.r_max))
         return np.exp(self._splines[index](logr))
+
+    def kernels(self, r) -> np.ndarray:
+        """Значения всех ядер сразу, форма (n_каналов, len(r)).
+
+        В отличие от поэлементного вызова ``kernel``, логарифм/клиппинг
+        считаются один раз на все каналы — это заметная доля времени при
+        построении матриц A.
+        """
+        logr = np.log(np.clip(np.asarray(r, dtype=float), self.r_min, self.r_max))
+        return np.exp(np.stack([sp(logr) for sp in self._splines], axis=0))

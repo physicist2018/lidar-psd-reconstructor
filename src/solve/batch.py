@@ -44,7 +44,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .basis import quadrature_grid
-from .inverse import ensemble_average, scan_variants
+from .inverse import build_design, ensemble_average, scan_variants
 from .kernels import (
     CBACK_SCALES,
     Channel,
@@ -359,16 +359,44 @@ def _apply_lidar_ratio_constraint(solutions_per_alt, altitudes, common, args) ->
         prev_tops = tops
 
 
-def _scan_profile(args, channels, tables, g1, r1_max):
+def _scan_grids(args, r1_max):
+    """Сетки перебора (степени, r0, r1), общие для DesignSet и scan_variants."""
+    degrees = sorted(set(args.degree))
+    r0_grid = np.geomspace(args.r0_min, args.r0_max, args.nr0)
+    r1_grid = np.geomspace(args.r1_min, r1_max, args.nr1)
+    return degrees, r0_grid, r1_grid
+
+
+def _build_design(args, channels, tables, r1_max):
+    """Предвычислить матрицы A один раз на весь пакет (все m и окна).
+
+    В отличие от перебора по высотам, матрицы A не зависят от измеренных
+    коэффициентов, поэтому решение каждой высоты сводится к МНК по готовым
+    A — это основной резерв ускорения пакетного режима.
+    """
+    degrees, r0_grid, r1_grid = _scan_grids(args, r1_max)
+    try:
+        return build_design(
+            channels, tables, degrees, r0_grid, r1_grid,
+            min_ratio=args.min_ratio, n_basis=args.n_basis,
+            zero_boundary=not args.no_zero_boundary,
+            order=args.quad_order, max_log_span=args.log_span,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"ошибка: {exc}") from None
+
+
+def _scan_profile(args, channels, tables, g1, r1_max, design=None):
     """Фаза перебора: полный список решений для одной высоты.
 
     Возвращает (solutions, scale): solutions уже отсортированы по Err.
     Список решений сохраняется между высотами — он нужен для ограничения
     лидарного отношения (переранжирование) и для финализации.
+
+    ``design`` — общий для всех высот DesignSet (строится один раз в
+    ``run_batch``); если не задан, строится здесь.
     """
-    degrees = sorted(set(args.degree))
-    r0_grid = np.geomspace(args.r0_min, args.r0_max, args.nr0)
-    r1_grid = np.geomspace(args.r1_min, r1_max, args.nr1)
+    degrees, r0_grid, r1_grid = _scan_grids(args, r1_max)
 
     print("перебор (m, r0, r1, степень)...")
     try:
@@ -385,6 +413,7 @@ def _scan_profile(args, channels, tables, g1, r1_max):
             zero_boundary=not args.no_zero_boundary,
             n_basis=args.n_basis,
             order=args.quad_order, max_log_span=args.log_span,
+            design=design,
         )
     except ValueError as exc:
         raise SystemExit(f"ошибка: {exc}") from None
@@ -402,7 +431,7 @@ def _finalize_profile(args, channels, tables, g1, solutions, r1_max):
     """
     from . import mode_analysis, size_moments  # избегаем циклического импорта
 
-    r_grid = np.geomspace(args.r0_min, r1_max, 256)
+    r_grid = np.geomspace(args.r0_min, r1_max, args.nr_out)
     n_avg, n_best, m_avg = ensemble_average(solutions, args.best, r_grid,
                                             smooth=not args.no_smooth,
                                             lam_rel=args.smooth_lam)
@@ -539,6 +568,9 @@ def run_batch(args) -> None:
 
     # 1) таблица ядер строится один раз и переиспользуется для всех высот
     solve_channels, tables, r1_max_eff = _build_kernel_tables(args, channels, m_grid)
+    # матрицы A (все m и окна) — тоже один раз на пакет
+    design = _build_design(args, solve_channels, tables, r1_max_eff)
+    print(f"  матрицы A предвычислены: {design.n_windows} окон × {len(design.m_values)} m")
 
     out_dir = args.batch_out_dir or os.path.dirname(os.path.abspath(args.batch))
     os.makedirs(out_dir, exist_ok=True)
@@ -560,7 +592,8 @@ def run_batch(args) -> None:
     # 2) фаза перебора: решения всех высот сохраняются (нужны для ограничения)
     solutions_per_alt = []
     for h, g1 in zip(altitudes, data):
-        solutions, _scale = _scan_profile(args, solve_channels, tables, g1, r1_max_eff)
+        solutions, _scale = _scan_profile(args, solve_channels, tables, g1,
+                                          r1_max_eff, design=design)
         solutions_per_alt.append(solutions)
         print(f"  высота {h:g} м: вариантов {len(solutions)}")
 
