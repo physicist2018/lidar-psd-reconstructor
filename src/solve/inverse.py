@@ -6,7 +6,7 @@
 
     min ||W (A C - g1)||^2 + gamma^2 ||L C||^2,   L — матрица вторых разностей,
 
-невязка Err = sum_j |g_j - g1_j| / g1_j.
+невязка Err = (1/J) sum_j |g_j - g1_j| / g1_j — среднее по каналам.
 
 Перебор (m, r0, r1, степень) даёт ансамбль решений; берутся G решений с
 наименьшей невязкой, по каждому восстанавливается n(r), результат
@@ -33,7 +33,7 @@ class Solution:
     gamma: float
     C: np.ndarray          # коэффициенты (в абсолютных единицах)
     basis: list            # B-сплайны этого окна
-    err: float             # Err = sum_j |g_j - g1_j| / g1_j
+    err: float             # Err = mean_j |g_j - g1_j| / g1_j
     g_fit: np.ndarray      # рассчитанные коэффициенты g = A C
 
     def distribution(self, r) -> np.ndarray:
@@ -83,9 +83,9 @@ def solve_regularized(A: np.ndarray, g1: np.ndarray, gamma: float,
 
 
 def residual_err(A: np.ndarray, C: np.ndarray, g1: np.ndarray) -> float:
-    """Невязка Err = sum_j |g_j - g1_j| / g1_j (g1 > 0)."""
+    """Невязка Err = mean_j |g_j - g1_j| / g1_j (g1 > 0)."""
     g1 = np.asarray(g1, dtype=float)
-    return float(np.sum(np.abs(A @ C - g1) / g1))
+    return float(np.mean(np.abs(A @ C - g1) / g1))
 
 
 def _solve_with_mask(A, b, gamma, weights, mask, nonneg):
@@ -276,9 +276,9 @@ def _solve_fixed_batched(design: DesignSet, g1n: np.ndarray, gamma: np.ndarray,
 
 def _residual_batched(design: DesignSet, c_norm: np.ndarray,
                       g1n: np.ndarray) -> np.ndarray:
-    """Относительная невязка Err для батча решений (n_m, n_w)."""
+    """Относительная невязка Err (среднее по каналам) для батча (n_m, n_w)."""
     g_fit = np.einsum("...jn,...n->...j", design.A, c_norm)
-    return np.sum(np.abs(g_fit - g1n) / g1n, axis=-1)
+    return np.mean(np.abs(g_fit - g1n) / g1n, axis=-1)
 
 
 def _cv_score_batched(design: DesignSet, g1n: np.ndarray, gamma: np.ndarray,
@@ -363,7 +363,7 @@ def _scan_batched(design: DesignSet, g1: np.ndarray, g1n: np.ndarray,
     c_norm = _solve_fixed_batched(design, g1n, gamma, weights)
     c_abs = c_norm * scale
     g_fit = np.einsum("...jn,...n->...j", design.A, c_abs)
-    err = np.sum(np.abs(g_fit - g1) / g1, axis=-1)
+    err = np.mean(np.abs(g_fit - g1) / g1, axis=-1)
     out: list[Solution] = []
     for i_m, m in enumerate(design.m_values):
         for i_w, w in enumerate(design.windows):
