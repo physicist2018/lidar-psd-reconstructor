@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """mkbase — сборка базы сечений для программы поиска решений.
 
-Вход — каталог с результатами расчётов ADDA следующей структуры::
+Вход — каталог с результатами расчётов ADDA. Поддерживаются две структуры,
+распознаваемые автоматически по подкаталогам форм.
+
+Классическая (``shapeNN/mr.../mi...``)::
 
     results_aggl/
       shapeNN/
@@ -9,6 +12,20 @@
           mi<imag>/
             shapeNN_mr<real>mi<imag>_x<X>[eps3]/
               CrossSec  mueller  log  log_orient_avg
+
+«Большая» (``NN/mReal/mImag/xSize/run*``)::
+
+    large_sizes/
+      01/
+        1.30/
+          0.000/
+            027.9296/
+              run000_read_g64_m1.3_id650720/
+                CrossSec  mueller  log
+
+В «большой» структуре в каталоге ``xSize`` может быть несколько прогонов
+``run*`` (в т.ч. неполных); берётся полный (есть ``CrossSec`` и ``mueller``),
+а если полных несколько — последний по времени изменения.
 
 Для каждой тройки ``(shape, mre, mim)`` собирается файл ``data.txt`` со
 столбцами ``x Cext Cabs Cback Qext Qabs Qback``, строки отсортированы по
@@ -40,7 +57,8 @@
 
 * ``Shape``, ``mre``, ``mim`` — из имён каталогов;
 * ``x`` — из имени листового каталога (суффикс ``_x<число>``; маркер ``eps3``
-  режима ``adda -eps 3`` отбрасывается); это «size along x-axis»;
+  режима ``adda -eps 3`` отбрасывается) или, в «большой» структуре, из имени
+  каталога ``xSize``; это «size along x-axis»;
 * ``Cext``, ``Cabs`` — из файла ``CrossSec``;
 * ``Cback`` — последнее значение столбца ``s11`` файла ``mueller`` (θ = 180°);
 * ``Qext``, ``Qabs``, ``Qback`` = ``C / (π·x²)``.
@@ -48,6 +66,7 @@
 Пример запуска::
 
     python src/mkbase/mkbase.py results_aggl -o base
+    python src/mkbase/mkbase.py large_sizes -o base_large
 """
 
 from __future__ import annotations
@@ -69,6 +88,12 @@ _SHAPE_RE = re.compile(r"^shape(\d+)$")
 _MR_RE = re.compile(r"^mr(-?\d+(?:\.\d+)?)$")
 _MI_RE = re.compile(r"^mi(-?\d+(?:\.\d+)?)$")
 _X_RE = re.compile(r"(\d+(?:\.\d+)?)")
+
+# «большая» структура: <NN>/<mReal>/<mImag>/<xSize>/run*
+_SHAPE_NUM_RE = re.compile(r"^\d+$")
+_REAL_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
+_XSIZE_RE = re.compile(r"^(-?\d+(?:\.\d+)?)(?:eps3)?$")
+_RUN_PREFIX = "run"
 
 # сколько байт читать с конца mueller (хватает на последнюю строку)
 _TAIL_BYTES = 8192
@@ -142,6 +167,50 @@ def load_point(xdir: str, x: float) -> "tuple[float, float, float, float] | None
         warn(f"пропуск {xdir}: {exc}")
         return None
     return x, cext, cabs, cback
+
+
+def _shape_dir_name(name: str) -> "str | None":
+    """Имя формы для ключа: ``shape01`` / ``01`` → ``shape01``; иначе None."""
+    if _SHAPE_RE.match(name):
+        return name
+    if _SHAPE_NUM_RE.match(name):
+        return f"shape{int(name):02d}"
+    return None
+
+
+def _shape_layout(path: str) -> "str | None":
+    """Структура каталога формы: ``"adda"``, ``"large"`` или None."""
+    names = _subdirs(path)
+    if any(_MR_RE.match(n) for n in names):
+        return "adda"
+    if any(_REAL_RE.match(n) for n in names):
+        return "large"
+    return None
+
+
+def _pick_run(xdir: str) -> "tuple[str | None, int]":
+    """Полный прогон в каталоге ``xSize``: ``(путь | None, число полных)``.
+
+    Полный — содержит ``CrossSec`` и ``mueller``. Если полных несколько,
+    выбирается последний по времени изменения (mtime).
+    """
+    complete: "list[tuple[float, str, str]]" = []
+    for name in _subdirs(xdir):
+        if not name.startswith(_RUN_PREFIX):
+            continue
+        run_dir = os.path.join(xdir, name)
+        if not (os.path.isfile(os.path.join(run_dir, "CrossSec"))
+                and os.path.isfile(os.path.join(run_dir, "mueller"))):
+            continue
+        try:
+            mtime = os.path.getmtime(run_dir)
+        except OSError:
+            mtime = 0.0
+        complete.append((mtime, name, run_dir))
+    if not complete:
+        return None, 0
+    complete.sort()
+    return complete[-1][2], len(complete)
 
 
 def _fmt(v: float) -> str:
@@ -338,11 +407,85 @@ def _write_averages(out_dir: str, data, grid, grids=None,
     return n_files, n_interp, n_vals
 
 
-def build(results_dir: str, out_dir: str, nx: "int | None" = None) -> "dict[str, int]":
+def _scan_adda_shape(shape_path: str, shape: str, data, seen,
+                     warn_count: int) -> int:
+    """Классическая структура: ``mr<real>/mi<imag>/<...>_x<X>``."""
+    for mr in _subdirs(shape_path):
+        m = _MR_RE.match(mr)
+        if not m:
+            continue
+        mre = float(m.group(1))
+        mr_path = os.path.join(shape_path, mr)
+        for mi in _subdirs(mr_path):
+            mm = _MI_RE.match(mi)
+            if not mm:
+                continue
+            mim = float(mm.group(1))
+            key = (shape, mre, mim)
+            seen.add(key)
+            mi_path = os.path.join(mr_path, mi)
+            for xdir in _subdirs(mi_path):
+                x = parse_x(xdir)
+                if x is None:
+                    warn(f"пропуск {os.path.join(mi_path, xdir)}: "
+                         "не распознан x в имени каталога")
+                    warn_count += 1
+                    continue
+                point = load_point(os.path.join(mi_path, xdir), x)
+                if point is None:
+                    warn_count += 1
+                    continue
+                data.setdefault(key, []).append(point)
+    return warn_count
+
+
+def _scan_large_shape(shape_path: str, shape: str, data, seen,
+                      warn_count: int) -> int:
+    """«Большая» структура: ``<mReal>/<mImag>/<xSize>/run*``."""
+    for mre_name in _subdirs(shape_path):
+        if not _REAL_RE.match(mre_name):
+            continue
+        mre = float(mre_name)
+        mre_path = os.path.join(shape_path, mre_name)
+        for mim_name in _subdirs(mre_path):
+            if not _REAL_RE.match(mim_name):
+                continue
+            mim = float(mim_name)
+            key = (shape, mre, mim)
+            seen.add(key)
+            mim_path = os.path.join(mre_path, mim_name)
+            for x_name in _subdirs(mim_path):
+                xdir = os.path.join(mim_path, x_name)
+                xm = _XSIZE_RE.match(x_name)
+                if not xm:
+                    warn(f"пропуск {xdir}: не распознан xSize в имени каталога")
+                    warn_count += 1
+                    continue
+                x = float(xm.group(1))
+                run_dir, n_runs = _pick_run(xdir)
+                if run_dir is None:
+                    warn(f"пропуск {xdir}: нет полного прогона "
+                         "(нужны CrossSec и mueller)")
+                    warn_count += 1
+                    continue
+                if n_runs > 1:
+                    warn(f"{xdir}: полных прогонов {n_runs}, выбран последний "
+                         f"по дате: {os.path.basename(run_dir)}")
+                    warn_count += 1
+                point = load_point(run_dir, x)
+                if point is None:
+                    warn_count += 1
+                    continue
+                data.setdefault(key, []).append(point)
+    return warn_count
+
+
+def build(results_dir: str, out_dir: str, nx: "int | None" = None) -> "dict[str, int | str]":
     """Сборка базы. Возвращает статистику.
 
-    ``nx`` — число узлов лог-эквидистантной сетки на группу ``(mre, mim)``;
-    ``None`` — каноническая сетка (общие узлы исходных таблиц).
+    Структура входного каталога (классическая или «большая») определяется
+    автоматически. ``nx`` — число узлов лог-эквидистантной сетки на группу
+    ``(mre, mim)``; ``None`` — каноническая сетка (общие узлы таблиц).
     """
     if nx is not None and nx < 2:
         raise ValueError(f"nx должен быть >= 2: {nx}")
@@ -350,44 +493,32 @@ def build(results_dir: str, out_dir: str, nx: "int | None" = None) -> "dict[str,
     data: "dict[tuple[str, float, float], list]" = {}
     seen: "set[tuple[str, float, float]]" = set()
 
-    for shape in _subdirs(results_dir):
-        if not _SHAPE_RE.match(shape):
+    layouts: "set[str]" = set()
+    for name in _subdirs(results_dir):
+        shape = _shape_dir_name(name)
+        if shape is None:
             continue
-        shape_path = os.path.join(results_dir, shape)
-        for mr in _subdirs(shape_path):
-            m = _MR_RE.match(mr)
-            if not m:
-                continue
-            mre = float(m.group(1))
-            mr_path = os.path.join(shape_path, mr)
-            for mi in _subdirs(mr_path):
-                mm = _MI_RE.match(mi)
-                if not mm:
-                    continue
-                mim = float(mm.group(1))
-                key = (shape, mre, mim)
-                seen.add(key)
-                mi_path = os.path.join(mr_path, mi)
-                for xdir in _subdirs(mi_path):
-                    x = parse_x(xdir)
-                    if x is None:
-                        warn(f"пропуск {os.path.join(mi_path, xdir)}: "
-                             "не распознан x в имени каталога")
-                        warn_count += 1
-                        continue
-                    point = load_point(os.path.join(mi_path, xdir), x)
-                    if point is None:
-                        warn_count += 1
-                        continue
-                    data.setdefault(key, []).append(point)
+        shape_path = os.path.join(results_dir, name)
+        layout = _shape_layout(shape_path)
+        if layout == "adda":
+            warn_count = _scan_adda_shape(shape_path, shape, data, seen,
+                                          warn_count)
+        elif layout == "large":
+            warn_count = _scan_large_shape(shape_path, shape, data, seen,
+                                           warn_count)
+        else:
+            warn(f"пропуск {shape_path}: не распознана структура каталога формы")
+            warn_count += 1
+            continue
+        layouts.add(layout)
 
     for shape, mre, mim in sorted(seen - set(data)):
         warn(f"нет валидных точек для {shape}/mre_{mre:.2f}_mim_{mim:.5f}")
         warn_count += 1
 
     # --- сетка для таблиц ---
-    grids = None
-    resampled = None
+    grids: "dict[tuple[float, float], list[float]] | None" = None
+    resampled: "dict[tuple[str, float, float], list] | None" = None
     grid: "list[float]" = []
     if nx is None:
         grid = _canonical_grid(data)
@@ -412,6 +543,7 @@ def build(results_dir: str, out_dir: str, nx: "int | None" = None) -> "dict[str,
         if grids is not None:
             nodes = grids[(mre, mim)]
             table, n_int = _resample(rows, nodes)
+            assert resampled is not None
             resampled[(shape, mre, mim)] = table
             n_resample += n_int
             if len(table) < len(nodes):
@@ -442,6 +574,7 @@ def build(results_dir: str, out_dir: str, nx: "int | None" = None) -> "dict[str,
         "interp": n_resample if grids is not None else n_interp,
         "avg_vals": n_avg_vals,
         "warns": warn_count,
+        "layouts": "+".join(sorted(layouts)) or "-",
     }
 
 
@@ -477,7 +610,8 @@ def main(argv=None) -> int:
         return 2
     st = build(args.results, args.out, nx=args.nx)
     grid_kind = "лог-эквидистантная" if args.nx is not None else "каноническая"
-    print(f"готово: {st['catalogs']} пошape каталогов ({st['points']} точек); "
+    print(f"готово: структура {st['layouts']}; "
+          f"{st['catalogs']} пошape каталогов ({st['points']} точек); "
           f"average — {st['avg']} каталогов, сетка {grid_kind} {st['grid']} узлов, "
           f"интерполяций {st['interp']} из {st['avg_vals']}; "
           f"{st['warns']} предупреждений → {args.out}")

@@ -3,7 +3,8 @@
 Проверяем: парсинг имён каталогов (в т.ч. маркера ``eps3``), парсинг файлов
 ``CrossSec``/``mueller``, сборку пошape-файлов и общий агрегат ``average/``
 с интерполяцией на каноническую сетку ``x`` и предупреждением о
-неканонических ``x``, а также режим ``nx`` (лог-эквидистантная сетка).
+неканонических ``x``, режим ``nx`` (лог-эквидистантная сетка), а также
+автоопределение «большой» структуры (``NN/mReal/mImag/xSize/run*``).
 
 Запуск:  uv run python tests/test_mkbase.py
 """
@@ -31,18 +32,45 @@ def _cback(x: float) -> float:
     return 2.0 * x
 
 
+def _write_point(d: str, x: float, cext: "float | None" = None,
+                 cabs: "float | None" = None,
+                 cback: "float | None" = None) -> None:
+    """Файлы ``CrossSec`` и ``mueller`` в каталоге прогона ``d``."""
+    cext = _cext(x) if cext is None else cext
+    cabs = _cabs(x) if cabs is None else cabs
+    cback = _cback(x) if cback is None else cback
+    with open(os.path.join(d, "CrossSec"), "w", encoding="utf-8") as fh:
+        fh.write(f"Cext\t= {cext!r}\nQext\t= 0\n"
+                 f"Cabs\t= {cabs!r}\nQabs\t= 0\n")
+    with open(os.path.join(d, "mueller"), "w", encoding="utf-8") as fh:
+        fh.write("theta s11 s12\n0.00 9.0 0.0\n"
+                 f"180.00 {cback!r} 0.0\n")
+
+
 def _write_run(root: str, shape: str, mr: str, mi: str, x: float,
                eps: bool = False) -> str:
-    """Создать листовой каталог прогона (``CrossSec`` + ``mueller``)."""
+    """Создать листовой каталог классической структуры."""
     name = f"{shape}_{mr}{mi}_x{x:g}" + ("eps3" if eps else "")
     d = os.path.join(root, shape, mr, mi, name)
     os.makedirs(d, exist_ok=True)
-    with open(os.path.join(d, "CrossSec"), "w", encoding="utf-8") as fh:
-        fh.write(f"Cext\t= {_cext(x)!r}\nQext\t= 0\n"
-                 f"Cabs\t= {_cabs(x)!r}\nQabs\t= 0\n")
-    with open(os.path.join(d, "mueller"), "w", encoding="utf-8") as fh:
-        fh.write("theta s11 s12\n0.00 9.0 0.0\n"
-                 f"180.00 {_cback(x)!r} 0.0\n")
+    _write_point(d, x)
+    return d
+
+
+def _write_large_run(root: str, shape: str, mre: str, mim: str, x: float,
+                     run: str = "run000_read_g64", complete: bool = True,
+                     mtime: "float | None" = None,
+                     cext: "float | None" = None) -> str:
+    """Создать прогон «большой» структуры ``<shape>/<mre>/<mim>/<x>/<run>``."""
+    d = os.path.join(root, shape, mre, mim, f"{x:09.4f}", run)
+    os.makedirs(d, exist_ok=True)
+    if complete:
+        _write_point(d, x, cext=cext)
+    else:
+        with open(os.path.join(d, "log"), "w", encoding="utf-8") as fh:
+            fh.write("incomplete\n")
+    if mtime is not None:
+        os.utime(d, (mtime, mtime))
     return d
 
 
@@ -96,6 +124,7 @@ def test_build_structure_and_average() -> None:
         _make_tree(src)
         stats = build(src, out)
 
+        assert stats["layouts"] == "adda"
         assert stats["catalogs"] == 4     # 2 формы × 2 mim
         assert stats["avg"] == 2          # 1 mre × 2 mim
         assert stats["grid"] == 5         # канонические узлы 1..5
@@ -179,6 +208,83 @@ def test_average_warns_on_noncanonical_x() -> None:
             build(src, out)
         assert "неканоническ" in err.getvalue()
         assert "3.5" in err.getvalue()
+
+
+def test_large_layout_autodetect_and_average() -> None:
+    """«Большая» структура: автоопределение, имена выходов, ``average/``."""
+    with tempfile.TemporaryDirectory() as td:
+        src, out = os.path.join(td, "large"), os.path.join(td, "base")
+        os.makedirs(src)
+        nodes = [1.0, 2.0, 82.7438]
+        for x in nodes:
+            _write_large_run(src, "01", "1.30", "0.000", x)
+            _write_large_run(src, "shape02", "1.30", "0.000", x)
+
+        stats = build(src, out)
+        assert stats["layouts"] == "large"
+        assert stats["catalogs"] == 2
+        assert stats["avg"] == 1
+        assert stats["grid"] == 3
+        assert stats["warns"] == 0
+
+        # «01» → shape01, «shape02» — как есть; mim — 5 знаков; x — из xSize
+        hdr, rows = _read(os.path.join(out, "shape01", "mre_1.30_mim_0.00000",
+                                       "data.txt"))
+        assert hdr == "# x Cext Cabs Cback Qext Qabs Qback"
+        assert [float(r[0]) for r in rows] == nodes
+        assert float(rows[1][1]) == 4.0 and float(rows[1][2]) == 2.0
+
+        hdr, rows = _read(os.path.join(out, "shape02", "mre_1.30_mim_0.00000",
+                                       "data.txt"))
+        assert [float(r[0]) for r in rows] == nodes
+
+        hdr, rows = _read(os.path.join(out, "average", "mre_1.30_mim_0.00000",
+                                       "data.txt"))
+        assert [int(r[7]) for r in rows] == [2, 2, 2]
+
+
+def test_large_layout_run_selection() -> None:
+    """Неполные прогоны пропускаются; из полных — последний по mtime."""
+    with tempfile.TemporaryDirectory() as td:
+        src, out = os.path.join(td, "large"), os.path.join(td, "base")
+        os.makedirs(src)
+        _write_large_run(src, "01", "1.30", "0.010", 1.0,
+                         run="run000_incomplete", complete=False, mtime=1000)
+        _write_large_run(src, "01", "1.30", "0.010", 1.0,
+                         run="run001_old", mtime=2000, cext=4.0)
+        _write_large_run(src, "01", "1.30", "0.010", 1.0,
+                         run="run002_new", mtime=3000, cext=9.0)
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            stats = build(src, out)
+        assert stats["layouts"] == "large"
+        assert stats["warns"] == 1
+        assert "полных прогонов 2" in err.getvalue()
+
+        hdr, rows = _read(os.path.join(out, "shape01", "mre_1.30_mim_0.01000",
+                                       "data.txt"))
+        assert len(rows) == 1 and float(rows[0][1]) == 9.0
+
+
+def test_large_layout_nx_grid() -> None:
+    """«Большая» структура совместима с ``nx`` (общая сетка и ``average/``)."""
+    with tempfile.TemporaryDirectory() as td:
+        src, out = os.path.join(td, "large"), os.path.join(td, "base")
+        os.makedirs(src)
+        for x in [1.0, 2.0, 3.0, 4.0, 5.0]:
+            _write_large_run(src, "01", "1.30", "0.000", x)
+            _write_large_run(src, "02", "1.30", "0.000", x)
+
+        stats = build(src, out, nx=7)
+        assert stats["grid"] == 7
+        for rel in (("shape01", "mre_1.30_mim_0.00000"),
+                    ("shape02", "mre_1.30_mim_0.00000"),
+                    ("average", "mre_1.30_mim_0.00000")):
+            hdr, rows = _read(os.path.join(out, *rel, "data.txt"))
+            assert len(rows) == 7
+            assert all(abs(float(r[1]) - float(r[0]) ** 2) < 1e-9
+                       for r in rows)
 
 
 def test_shape_interps_nonpositive_uses_linear() -> None:
