@@ -16,3 +16,9 @@ mie_Cext_Cback.png
 
 # База сечений (mkbase)
 base/
+
+# Тяжёлые данные расчётов ADDA (не коммитим)
+/large_sizes/
+/results_aggl/
+/results_aggl.zip
+/*.npz

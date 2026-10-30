@@ -25,7 +25,8 @@
                           и входной строкой);
        moments.txt      — интегральные характеристики по каждой высоте;
        refractive.txt   — показатель преломления по каждой высоте;
-       errors.txt       — относительные ошибки восстановления по каналам;
+       errors.txt       — относительные ошибки восстановления по каналам
+                          и средняя по каналам Err;
        plot_<H>.png     — график распределения и согласия по каждому каналу.
 
 Опциональное ограничение (--lidar-ratio-cons): восстановленное лидарное
@@ -507,10 +508,10 @@ def _write_profile(out_dir, h: float, channels, prof, g1) -> None:
     with open(os.path.join(out_dir, "refractive.txt"), "a", encoding="utf-8") as fr:
         fr.write(f"{h:g}  {prof['m_avg'].real:g}  {prof['m_avg'].imag:g}\n")
 
-    # 4) errors.txt — относительные ошибки восстановления по каналам + суммарная
+    # 4) errors.txt — относительные ошибки по каналам + средняя по каналам
     g1a = np.asarray(g1, dtype=float)
     rel = np.abs(prof["g_fit"] - g1a) / g1a
-    err = float(np.sum(rel))
+    err = float(np.mean(rel))
     with open(os.path.join(out_dir, "errors.txt"), "a", encoding="utf-8") as fe:
         fe.write(f"{h:g}  " + "  ".join(f"{v:g}" for v in rel) + f"  {err:g}\n")
 
@@ -604,7 +605,7 @@ def run_batch(args) -> None:
         fr.write("# H  Re(m)  Im(m)\n")
     with open(os.path.join(out_dir, "errors.txt"), "w", encoding="utf-8") as fe:
         fe.write("# H  " + "  ".join(ch.name for ch in channels) + "  Err\n" +
-                 "# относительные ошибки |g_fit-g1|/g1 (Err = сумма по каналам)\n")
+                 "# относительные ошибки |g_fit-g1|/g1 (Err = среднее по каналам)\n")
 
     common = _common_lidar_wavelengths(channels)
     write_lidar = lr_flag and bool(common)

@@ -102,11 +102,14 @@ def test_run_batch_outputs(tmp_path):
     assert len(refr) == 2
     assert all(im <= 0 for _, _, im in refr)  # поглощающий аэрозоль: Im(m) <= 0
 
-    # errors.txt: H + ошибки по 5 каналам + Err
+    # errors.txt: H + ошибки по 5 каналам + Err (среднее по каналам)
     err = [ln.split() for ln in (out / "errors.txt").read_text(encoding="utf-8").splitlines()
            if ln and not ln.startswith("#")]
     assert len(err) == 2
     assert len(err[0]) == 7  # H + 5 каналов + Err
+    vals = [float(v) for v in err[0][1:]]
+    mean = sum(vals[:-1]) / len(vals[:-1])
+    assert abs(vals[-1] - mean) <= 1e-4 * max(1.0, abs(mean))
 
     # dist_100.txt: комментарии в начале + столбцы r и dV/dln r
     dist = (out / "dist_100.txt").read_text(encoding="utf-8").splitlines()
