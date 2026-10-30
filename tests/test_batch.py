@@ -135,6 +135,22 @@ def test_kernel_table_built_once(monkeypatch, tmp_path):
     assert calls["n"] == 1  # одна таблица ядер на пакет (не на высоту)
 
 
+def test_streaming_matches_retained(tmp_path):
+    """Потоковая обработка (без ограничения) даёт те же файлы, что и вариант
+    с удержанием решений всех высот (ограничение с весом 0 — только
+    переранжирование по Err, т.е. тот же порядок)."""
+    out_stream = tmp_path / "stream"
+    out_retain = tmp_path / "retain"
+    run_batch(_args(batch_out_dir=str(out_stream), no_plot=True))
+    run_batch(_args(batch_out_dir=str(out_retain), no_plot=True,
+                    lidar_ratio_cons=True, lidar_ratio_w=0.0))
+    for name in ("moments.txt", "refractive.txt", "errors.txt",
+                 "dist_100.txt", "dist_500.txt"):
+        a = (out_stream / name).read_bytes()
+        b = (out_retain / name).read_bytes()
+        assert a == b, f"{name} отличается: потоково vs с удержанием"
+
+
 def test_lidar_ratio_file_written(tmp_path):
     """--lidar-ratio-cons: создаётся lidar_ratios.txt с S по общим длинам волн."""
     out = tmp_path / "out"

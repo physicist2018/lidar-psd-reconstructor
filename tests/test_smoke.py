@@ -386,6 +386,43 @@ def test_design_set_matches_scan() -> None:
             assert abs(s_ref.gamma - s_via.gamma) <= 1e-10 * abs(s_ref.gamma)
 
 
+def test_cv_closed_form_matches_bruteforce() -> None:
+    """Закрытая форма LOO-CV (Шерман–Моррисон) совпадает с пересчётом
+    МНК без каждой строки (``cv_error``) по всей сетке gamma."""
+    from solve.inverse import _cv_score_batched, build_design, cv_error
+
+    channels = make_channels()
+    kern = KernelTable(M, channels, 0.05, 5.0, dx_max=0.1)
+    tables = {M: kern}
+    r0g = np.geomspace(0.05, 0.35, 3)
+    r1g = np.geomspace(1.5, 5.0, 2)
+    design = build_design(channels, tables, [1, 2, 3], r0g, r1g,
+                          n_basis=5, zero_boundary=True, order=12,
+                          max_log_span=0.2)
+    g1 = forward_measurements(channels, kern, demo_true_distribution, 0.05, 5.0)
+    g1n = g1 / g1.max()
+    w = 1.0 / g1n
+
+    for gr in (1e-6, 1e-3, 0.1, 1.0, 1e3):
+        gamma = gr * design.s0
+        fast = _cv_score_batched(design, g1n, gamma, w)
+        slow = np.array([
+            [cv_error(design.A[i, j], g1n, float(gamma[i, j]), weights=w)
+             for j in range(design.n_windows)]
+            for i in range(len(design.m_values))
+        ])
+        assert np.allclose(fast, slow, rtol=1e-9, atol=0.0), gr
+
+
+def test_solution_has_slots() -> None:
+    """``Solution`` без __dict__ — компактное хранение ансамбля в --batch."""
+    from solve.inverse import Solution
+
+    s = Solution(m=M, degree=2, r0=0.1, r1=2.0, gamma=0.1,
+                 C=np.zeros(3), basis=(), err=0.0, g_fit=np.zeros(5))
+    assert not hasattr(s, "__dict__")
+
+
 def test_weights_change_result() -> None:
     """Веса 1/g1 (относительные) меняют решение переопределённой системы."""
     rng = np.random.default_rng(0)

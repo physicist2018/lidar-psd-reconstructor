@@ -551,6 +551,26 @@ def _plot_profile(out_path, channels, g1, prof) -> bool:
     return True
 
 
+def _emit_profile(args, out_dir, h, channels, g1, solutions, tables, r1_max,
+                  common, write_lidar) -> None:
+    """Финализация одной высоты: распределение, график, строки общих файлов."""
+    prof = _finalize_profile(args, channels, tables, g1, solutions, r1_max)
+    _write_profile(out_dir, h, channels, prof, g1)
+    _plot_profile(os.path.join(out_dir, f"plot_{h:g}.png"), channels, g1, prof)
+    s_str = ""
+    if write_lidar:
+        s_vals = _lidar_ratio(prof["g_fit"], common)
+        with open(os.path.join(out_dir, "lidar_ratios.txt"), "a",
+                  encoding="utf-8") as fl:
+            fl.write(f"{h:g}  " + "  ".join(
+                f"{v:g}" if np.isfinite(v) else "nan" for v in s_vals) + "\n")
+        s_str = "  S = " + ", ".join(
+            f"{v:g}" if np.isfinite(v) else "nan" for v in s_vals)
+    print(f"  высота {h:g} м: ⟨m⟩ = {prof['m_avg'].real:.3f}"
+          f"{prof['m_avg'].imag:+.3f}j, "
+          f"N = {prof['moments']['N_cm-3']:.3g} см⁻³{s_str}")
+
+
 def run_batch(args) -> None:
     """Пакетный режим: читает txt, решает каждую высоту, пишет выходы."""
     channels, altitudes, data = parse_batch_txt(args.batch)
@@ -588,53 +608,49 @@ def run_batch(args) -> None:
 
     common = _common_lidar_wavelengths(channels)
     write_lidar = lr_flag and bool(common)
-
-    # 2) фаза перебора: решения всех высот сохраняются (нужны для ограничения)
-    solutions_per_alt = []
-    for h, g1 in zip(altitudes, data):
-        solutions, _scale = _scan_profile(args, solve_channels, tables, g1,
-                                          r1_max_eff, design=design)
-        solutions_per_alt.append(solutions)
-        print(f"  высота {h:g} м: вариантов {len(solutions)}")
-
-    # 3) ограничение лидарного отношения (если включено и применимо)
-    if lr_flag:
-        if len(altitudes) < 2:
-            print("  [предупреждение] --lidar-ratio-cons: нужно >= 2 высот; "
-                  "ограничение не применяется")
-        elif not common:
-            print("  [предупреждение] --lidar-ratio-cons: нет общих длин волн "
-                  "β∩α для лидарного отношения; ограничение не применяется")
-        else:
-            print("  применяем ограничение: общие длины волн "
-                  + ", ".join(f"{wl * 1e3:g} нм" for wl, _, _ in common))
-            _apply_lidar_ratio_constraint(solutions_per_alt, altitudes, common, args)
+    # переранжирование по лидарному отношению требует решений всех высот,
+    # поэтому в этом случае их приходится держать в памяти целиком
+    retain = lr_flag and len(altitudes) >= 2 and bool(common)
 
     if write_lidar:
         with open(os.path.join(out_dir, "lidar_ratios.txt"), "w", encoding="utf-8") as fl:
             fl.write("# H  " + "  ".join(f"S_{wl * 1e3:g}" for wl, _, _ in common) + "\n")
             fl.write("# восстановленное лидарное отношение S = α/β по общим длинам волн\n")
 
-    # 4) финализация по каждой высоте и запись выходов
-    for i in range(len(altitudes)):
-        h, g1 = altitudes[i], data[i]
-        solutions = solutions_per_alt[i]
-        prof = _finalize_profile(args, solve_channels, tables, g1, solutions, r1_max_eff)
-        _write_profile(out_dir, h, channels, prof, g1)
-        _plot_profile(os.path.join(out_dir, f"plot_{h:g}.png"), channels, g1, prof)
-        s_str = ""
-        if write_lidar:
-            s_vals = _lidar_ratio(prof["g_fit"], common)
-            with open(os.path.join(out_dir, "lidar_ratios.txt"), "a",
-                      encoding="utf-8") as fl:
-                fl.write(f"{h:g}  " + "  ".join(
-                    f"{v:g}" if np.isfinite(v) else "nan" for v in s_vals) + "\n")
-            s_str = "  S = " + ", ".join(
-                f"{v:g}" if np.isfinite(v) else "nan" for v in s_vals)
-        print(f"  высота {h:g} м: ⟨m⟩ = {prof['m_avg'].real:.3f}"
-              f"{prof['m_avg'].imag:+.3f}j, "
-              f"N = {prof['moments']['N_cm-3']:.3g} см⁻³{s_str}")
-        # списки решений больше не нужны — освобождаем память
-        solutions_per_alt[i] = None
+    if retain:
+        # 2) перебор всех высот: решения нужны для ограничения лидарного отношения
+        solutions_per_alt = []
+        for h, g1 in zip(altitudes, data):
+            solutions, _scale = _scan_profile(args, solve_channels, tables, g1,
+                                              r1_max_eff, design=design)
+            solutions_per_alt.append(solutions)
+            print(f"  высота {h:g} м: вариантов {len(solutions)}")
+
+        # 3) ограничение лидарного отношения
+        print("  применяем ограничение: общие длины волн "
+              + ", ".join(f"{wl * 1e3:g} нм" for wl, _, _ in common))
+        _apply_lidar_ratio_constraint(solutions_per_alt, altitudes, common, args)
+
+        # 4) финализация по каждой высоте и запись выходов
+        for i, (h, g1) in enumerate(zip(altitudes, data)):
+            _emit_profile(args, out_dir, h, channels, g1, solutions_per_alt[i],
+                          tables, r1_max_eff, common, write_lidar)
+            # списки решений больше не нужны — освобождаем память
+            solutions_per_alt[i] = None
+    else:
+        if lr_flag:
+            if len(altitudes) < 2:
+                print("  [предупреждение] --lidar-ratio-cons: нужно >= 2 высот; "
+                      "ограничение не применяется")
+            else:
+                print("  [предупреждение] --lidar-ratio-cons: нет общих длин волн "
+                      "β∩α для лидарного отношения; ограничение не применяется")
+        # высоты независимы — обрабатываем потоково, не копя решения в памяти
+        for h, g1 in zip(altitudes, data):
+            solutions, _scale = _scan_profile(args, solve_channels, tables, g1,
+                                              r1_max_eff, design=design)
+            print(f"  высота {h:g} м: вариантов {len(solutions)}")
+            _emit_profile(args, out_dir, h, channels, g1, solutions,
+                          tables, r1_max_eff, common, write_lidar)
 
     print(f"пакетная обработка завершена; результаты: {out_dir}")

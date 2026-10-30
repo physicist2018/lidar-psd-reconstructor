@@ -22,7 +22,7 @@ import numpy as np
 from .basis import window_geometry
 
 
-@dataclass
+@dataclass(slots=True)
 class Solution:
     """Одно решение для конкретного (m, r0, r1, степень сплайна)."""
 
@@ -256,15 +256,21 @@ def _weights_vector(g1n: np.ndarray, weights, relative: bool) -> np.ndarray:
     return np.asarray(weights, dtype=float)
 
 
-def _solve_fixed_batched(design: DesignSet, g1n: np.ndarray, gamma: np.ndarray,
-                         weights: np.ndarray) -> np.ndarray:
-    """Батчевое решение расширенной системы для готовых ``gamma`` (n_m, n_w)."""
-    A = design.A
-    L = second_diff_matrix(design.n_unknown)
+def _augmented_batched(A: np.ndarray, g1n: np.ndarray, gamma: np.ndarray,
+                       weights: np.ndarray, L: np.ndarray):
+    """Расширенная система [W A; γL] c = [W g1; 0] для батча (n_m, n_w)."""
     aw = A * weights[None, None, :, None]
     aug = np.concatenate([aw, gamma[..., None, None] * L], axis=-2)
     rhs = np.empty(aug.shape[:-1])
     rhs[...] = np.concatenate([g1n * weights, np.zeros(L.shape[0])])
+    return aug, rhs
+
+
+def _solve_fixed_batched(design: DesignSet, g1n: np.ndarray, gamma: np.ndarray,
+                         weights: np.ndarray) -> np.ndarray:
+    """Батчевое решение расширенной системы для готовых ``gamma`` (n_m, n_w)."""
+    L = second_diff_matrix(design.n_unknown)
+    aug, rhs = _augmented_batched(design.A, g1n, gamma, weights, L)
     return _batched_lstsq(aug, rhs)
 
 
@@ -275,25 +281,65 @@ def _residual_batched(design: DesignSet, c_norm: np.ndarray,
     return np.sum(np.abs(g_fit - g1n) / g1n, axis=-1)
 
 
+def _cv_score_batched(design: DesignSet, g1n: np.ndarray, gamma: np.ndarray,
+                      weights: np.ndarray) -> np.ndarray:
+    """LOO-кросс-валидация закрытой формулой (батчево по окнам).
+
+    Пусть ``M = X_wᵀ X_w + γ² Lᵀ L`` (это ровно ``augᵀ aug``), ``c`` — МНК
+    по всем строкам, ``p_i = a_i·c``, ``k_i = w_i²`` и
+    ``s_i = a_iᵀ M⁻¹ a_i`` (leverage строки в весовой постановке). Тогда
+    решение без i-й строки даёт
+
+        y_i − pred_i^{(−i)} = (y_i − p_i) / (1 − k_i·s_i),
+
+    а ``s_i`` считается из уже имеющегося SVD: ``M⁻¹ = V S⁻² Vᵀ``, т.е.
+    ``s_i = ‖S⁻¹ Vᵀ a_i‖²``. Возвращает ``Σ_i |y_i − pred_i|/y_i`` (та же
+    метрика, что и у брутфорс ``cv_error``).
+
+    Если leverage близок к 1 (вырожденный случай), соответствующие окна
+    досчитываются брутфорсом.
+    """
+    A = design.A
+    L = second_diff_matrix(design.n_unknown)
+    aug, rhs = _augmented_batched(A, g1n, gamma, weights, L)
+    u, s, vh = np.linalg.svd(aug, full_matrices=False)
+    cutoff = np.finfo(aug.dtype).eps * max(aug.shape[-2], aug.shape[-1])
+    keep = s > cutoff * s[..., :1]
+    s_inv = np.where(keep, 1.0 / np.where(keep, s, 1.0), 0.0)
+    ut_b = np.einsum("...ji,...j->...i", u, rhs)
+    c = np.einsum("...ji,...j->...i", vh, s_inv * ut_b)
+    # M⁻¹ = V S⁻² Vᵀ = Zᵀ Z, где Z = S⁻¹ Vᵀ
+    z = s_inv[..., :, None] * vh                       # (..., n, n)
+    za = np.einsum("...ki,...ji->...jk", z, A)         # (..., j, n)
+    s_ii = np.einsum("...jk,...jk->...j", za, za)      # a_iᵀ M⁻¹ a_i
+    p = np.einsum("...ji,...i->...j", A, c)            # a_i · c
+    k = weights * weights
+    denom = 1.0 - k * s_ii                             # (..., j)
+    ok = denom > 0.0
+    resid = (g1n - p) / np.where(ok, denom, 1.0)
+    score = np.sum(np.abs(resid) / g1n, axis=-1)
+    if not np.all(ok):
+        for i_m, i_w in np.argwhere(~ok.all(axis=-1)):
+            score[i_m, i_w] = cv_error(A[i_m, i_w], g1n,
+                                       float(gamma[i_m, i_w]),
+                                       weights=weights)
+    return score
+
+
 def _select_gamma_batched(design: DesignSet, g1n: np.ndarray,
                           gamma_rel: np.ndarray,
                           weights: np.ndarray, gamma_select: str) -> np.ndarray:
     """Выбор gamma по каждому (m, окну) без ограничения C >= 0.
 
-    "err" — батчево по всей сетке gamma; "cv" — пооконный LOO
-    (не батчируется, но матрицы A уже готовы)."""
+    Оба правила батчевые: "err" — по невязке Err, "cv" — по LOO-оценке
+    закрытой формулой (см. ``_cv_score_batched``)."""
     s0 = design.s0
     best_score = np.full(s0.shape, np.inf)
     best_gamma = np.zeros_like(s0)
     for gr in gamma_rel:
         gamma = gr * s0
         if gamma_select == "cv":
-            score = np.empty(s0.shape)
-            for i_m in range(s0.shape[0]):
-                for i_w in range(s0.shape[1]):
-                    score[i_m, i_w] = cv_error(
-                        design.A[i_m, i_w], g1n, gamma[i_m, i_w],
-                        weights=weights)
+            score = _cv_score_batched(design, g1n, gamma, weights)
         else:
             c = _solve_fixed_batched(design, g1n, gamma, weights)
             score = _residual_batched(design, c, g1n)
@@ -324,10 +370,10 @@ def _scan_batched(design: DesignSet, g1: np.ndarray, g1n: np.ndarray,
             out.append(Solution(
                 m=m, degree=w.degree, r0=w.r0, r1=w.r1,
                 gamma=float(gamma[i_m, i_w]),
-                C=c_abs[i_m, i_w].copy(),
+                C=c_abs[i_m, i_w],
                 basis=design.geometry[i_w].basis,
                 err=float(err[i_m, i_w]),
-                g_fit=g_fit[i_m, i_w].copy(),
+                g_fit=g_fit[i_m, i_w],
             ))
     return out
 
