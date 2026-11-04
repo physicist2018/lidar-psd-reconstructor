@@ -22,3 +22,11 @@ base/
 /results_aggl/
 /results_aggl.zip
 /*.npz
+
+# Артефакты сборки C-версии (csolve)
+/csolve/csolve
+/csolve/src/*.o
+/csolve/src/*.d
+/csolve/tests/unit_tests
+/csolve/tests/*.dSYM/
+/csolve/build/
