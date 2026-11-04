@@ -146,13 +146,16 @@ def token_equal(a: str, b: str, rtol: float = 1e-5) -> bool:
     return False
 
 
+PLOT_EXTS = {".png", ".pdf", ".svg"}
+
+
 def compare_text_files(name, ref_dir, cur_dir):
     import pathlib
 
     ref = pathlib.Path(ref_dir)
     cur = pathlib.Path(cur_dir)
-    ref_files = {p.name for p in ref.iterdir() if p.suffix != ".png"}
-    cur_files = {p.name for p in cur.iterdir() if p.suffix != ".png"}
+    ref_files = {p.name for p in ref.iterdir() if p.suffix not in PLOT_EXTS}
+    cur_files = {p.name for p in cur.iterdir() if p.suffix not in PLOT_EXTS}
     problems = []
     if ref_files != cur_files:
         problems.append(("набор файлов", sorted(ref_files), sorted(cur_files)))

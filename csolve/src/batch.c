@@ -713,9 +713,11 @@ static void emit_profile(const args_t *a, const char *out_dir, double h,
     }
 
     if (!a->no_plot) {
-        char *pp = xasprintf("%s/plot_%g.png", out_dir, h);
-        plot_profile(pp, prof.r_grid, prof.nr, prof.n_avg, solve_ch, b->nch,
-                     g1, prof.g_fit, h);
+        plot_opts_t po = {a->plot_format, a->plot_dpi};
+        char *pp = xasprintf("%s/plot_%g.%s", out_dir, h,
+                             plot_format_ext(a->plot_format));
+        plot_profile(&po, pp, prof.r_grid, prof.nr, prof.n_avg, solve_ch,
+                     b->nch, g1, prof.g_fit, h);
         free(pp);
     }
 
@@ -1001,62 +1003,65 @@ void run_batch(const args_t *a)
     }
 
     if (!a->no_plot) {
+        plot_opts_t po = {a->plot_format, a->plot_dpi};
+        const char *ext = plot_format_ext(a->plot_format);
         char *pp;
-        pp = xasprintf("%s/refractive.png", out_dir);
-        plot_refractive_profile(pp, b.alt, met.m_re, met.m_im, b.n_alt);
+        pp = xasprintf("%s/refractive.%s", out_dir, ext);
+        plot_refractive_profile(&po, pp, b.alt, met.m_re, met.m_im, b.n_alt);
         free(pp);
 
-        pp = xasprintf("%s/error.png", out_dir);
+        pp = xasprintf("%s/error.%s", out_dir, ext);
         {
             double *err_pct = dbl_array(b.n_alt);
             for (int i = 0; i < b.n_alt; i++)
                 err_pct[i] = met.err[i] * 100.0;
             const double *vals[1] = {err_pct};
             const char *names[1] = {"Err"};
-            plot_profiles(pp, "Средняя относительная ошибка восстановления, %",
+            plot_profiles(&po, pp,
+                          "Средняя относительная ошибка восстановления, %",
                           "Err, %", 1, b.alt, vals, names, b.n_alt);
             free(err_pct);
         }
         free(pp);
 
-        pp = xasprintf("%s/volumes.png", out_dir);
+        pp = xasprintf("%s/volumes.%s", out_dir, ext);
         {
             const double *vals[3] = {met.V, met.Vc, met.Vf};
             const char *names[3] = {"V", "Vc", "Vf"};
-            plot_profiles(pp, "Объёмная концентрация мод",
+            plot_profiles(&po, pp, "Объёмная концентрация мод",
                           "V, мкм³/см³", 3, b.alt, vals, names, b.n_alt);
         }
         free(pp);
 
-        pp = xasprintf("%s/radii.png", out_dir);
+        pp = xasprintf("%s/radii.%s", out_dir, ext);
         {
             const double *vals[3] = {met.rmf, met.rmc, met.reff};
             const char *names[3] = {"rmf", "rmc", "reff"};
-            plot_profiles(pp, "Радиусы мод", "r, мкм", 3, b.alt, vals, names,
-                          b.n_alt);
+            plot_profiles(&po, pp, "Радиусы мод", "r, мкм", 3, b.alt, vals,
+                          names, b.n_alt);
         }
         free(pp);
 
-        pp = xasprintf("%s/concentration.png", out_dir);
+        pp = xasprintf("%s/concentration.%s", out_dir, ext);
         {
             const double *vals[1] = {met.Nc};
             const char *names[1] = {"N"};
-            plot_profiles(pp, "Числовая концентрация", "N, см⁻³", 1, b.alt,
-                          vals, names, b.n_alt);
+            plot_profiles(&po, pp, "Числовая концентрация", "N, см⁻³", 1,
+                          b.alt, vals, names, b.n_alt);
         }
         free(pp);
 
-        pp = xasprintf("%s/sigma.png", out_dir);
+        pp = xasprintf("%s/sigma.%s", out_dir, ext);
         {
             const double *vals[3] = {met.sgf, met.sgc, met.sgo};
             const char *names[3] = {"sigma_f", "sigma_c", "sigma"};
-            plot_profiles(pp, "Ширины логнормальных мод", "sigma", 3, b.alt,
-                          vals, names, b.n_alt);
+            plot_profiles(&po, pp, "Ширины логнормальных мод", "sigma", 3,
+                          b.alt, vals, names, b.n_alt);
         }
         free(pp);
 
         if (nl > 0) {
-            pp = xasprintf("%s/lidar_ratios.png", out_dir);
+            pp = xasprintf("%s/lidar_ratios.%s", out_dir, ext);
             const double *svals[32];
             const char *snames[32];
             char *sbuf[32];
@@ -1067,7 +1072,7 @@ void run_batch(const args_t *a)
                 sbuf[k] = xasprintf("S_{%g}", common[k].wl * 1e3);
                 snames[k] = sbuf[k];
             }
-            plot_profiles(pp, "Лидарное отношение S = α/β", "S = α/β",
+            plot_profiles(&po, pp, "Лидарное отношение S = α/β", "S = α/β",
                           nl < 32 ? nl : 32, b.alt, svals, snames, b.n_alt);
             for (int k = 0; k < nl && k < 32; k++)
                 free(sbuf[k]);
