@@ -220,11 +220,21 @@ def build_design(channels, kernels_map: dict, degrees, r0_grid, r1_grid, *,
     m_values = list(kernels_map)
     n_unknown = n_basis - (2 if zero_boundary else 0)
     A = np.empty((len(m_values), len(windows), len(channels), n_unknown))
-    for i_m, mv in enumerate(m_values):
-        table = kernels_map[mv]
-        for i_w, g in enumerate(geometry):
-            k = table.kernels(g.nodes)                # (n_channels, n_q)
-            A[i_m, i_w] = (k * g.dvol * g.weights) @ g.values
+    # Ядра считаются ОДИН раз на объединённом наборе узлов всех окон (np.unique):
+    # окна вложены друг в друга, а на коротких массивах (~10^3 точек) доминируют
+    # накладные расходы на вызов сплайна. Значение ядра зависит только от r,
+    # поэтому результат тот же, а сплайн вызывается в ~70 раз реже.
+    if geometry:
+        offsets = np.cumsum([0] + [int(g.nodes.size) for g in geometry])
+        all_nodes = np.concatenate([g.nodes for g in geometry])
+        uniq_nodes, inverse = np.unique(all_nodes, return_inverse=True)
+        node_index = [inverse[offsets[i]:offsets[i + 1]]
+                      for i in range(len(geometry))]
+        for i_m, mv in enumerate(m_values):
+            k_uni = kernels_map[mv].kernels(uniq_nodes)   # (n_channels, n_unique)
+            for i_w, g in enumerate(geometry):
+                k = k_uni[:, node_index[i_w]]             # (n_channels, n_q)
+                A[i_m, i_w] = (k * g.dvol * g.weights) @ g.values
     if windows:
         s0 = np.linalg.svd(A, compute_uv=False)[..., 0]
     else:

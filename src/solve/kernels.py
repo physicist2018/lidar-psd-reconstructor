@@ -23,6 +23,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import warnings
+from functools import lru_cache
 
 import numpy as np
 from scipy.interpolate import CubicSpline
@@ -35,7 +36,20 @@ from scipy.interpolate import CubicSpline
 if importlib.util.find_spec("numba") is not None:
     os.environ.setdefault("MIEPYTHON_USE_JIT", "1")
 
-import miepython as mie
+# miepython импортируется лениво (см. ``_mie``): при numba-бэкенде импорт
+# компилирует JIT-ядро и занимает ~1.4 с. В табличном режиме (``--tables``)
+# Mie-ядра не вычисляются вовсе, поэтому платить эту цену не нужно.
+_mie_module = None
+
+
+def _mie():
+    """Ленивый доступ к модулю ``miepython`` (импорт при первом обращении)."""
+    global _mie_module
+    if _mie_module is None:
+        import miepython
+        _mie_module = miepython
+    return _mie_module
+
 
 # (1 мкм)^2 = 1e-12 м^2 — перевод сечения из мкм^2 в м^2
 UM2_TO_M2 = 1e-12
@@ -150,7 +164,7 @@ class Channel:
             if self.kind == "beta":
                 K = K * self.cback_scale
             return K
-        qext, _qsca, qback, _g = mie.efficiencies_mx(m, x)
+        qext, _qsca, qback, _g = _mie().efficiencies_mx(m, x)
         if self.kind == "alpha":
             return UM2_TO_M2 * np.pi * r * r * qext
         return UM2_TO_M2 * r * r * qback / 4.0
@@ -219,41 +233,19 @@ class TabularCrossSection:
         заголовок не претендуют, так как начинаются с ``Units:``. Столбцы
         выбираются по имени, а не по позиции, поэтому лишние колонки
         (``n`` в ``average/``) и их порядок значения не имеют.
+
+        Результат кэшируется по (путь, mtime, размер, колонка, extrapolate):
+        за один запуск один и тот же ``data.txt`` запрашивается несколько раз
+        (колонки alpha/beta, границы покрытия по x, итоговые ядра), а разбор
+        текста — самая дорогая часть загрузки таблиц. Кэш сбрасывается сам,
+        если файл перезаписан (меняются mtime/размер).
         """
         if not os.path.isfile(path):
             raise FileNotFoundError(
                 f"файл таблицы сечений не найден: {path}")
-        header: list[str] | None = None
-        rows: list[list[str]] = []
-        with open(path, "r", encoding="utf-8") as fh:
-            for ln in fh:
-                s = ln.strip()
-                if not s:
-                    continue
-                if s.startswith("#"):
-                    toks = s.lstrip("#").split()
-                    if header is None and toks and toks[0] == "x" and column in toks:
-                        header = toks
-                    continue
-                rows.append(s.split())
-        if header is None:
-            raise ValueError(
-                f"{path}: не найден заголовок формата mkbase с колонками "
-                f"'x' и {column!r} (ожидается, например, "
-                f"'# x Cext Cabs Cback Qext Qabs Qback')")
-        ix = header.index("x")
-        ic = header.index(column)
-        xs, cs = [], []
-        for toks in rows:
-            if len(toks) <= max(ix, ic):
-                raise ValueError(
-                    f"{path}: в строке нет колонки {column!r}: {' '.join(toks)!r}")
-            xs.append(float(toks[ix]))
-            cs.append(float(toks[ic]))
-        if len(xs) < 3:
-            raise ValueError(f"{path}: недостаточно точек (>= 3), найдено {len(xs)}")
-        return cls(np.asarray(xs, float), np.asarray(cs, float),
-                   extrapolate=extrapolate, path=path)
+        mtime_ns, size = _file_stamp(path)
+        return _from_data_file_cached(path, mtime_ns, size, column,
+                                      bool(extrapolate))
 
     def cross_section(self, x) -> np.ndarray:
         """Сечение C(x) в мкм² (интерполяция в log-log)."""
@@ -268,6 +260,73 @@ class TabularCrossSection:
                     f"или включите --table-extrapolate")
             out = np.exp(self._interp(np.log(x)))
         return out
+
+
+def _file_stamp(path: str) -> tuple[int, int]:
+    """Ключ актуальности кэша чтения таблицы: (mtime_ns, размер файла)."""
+    st = os.stat(path)
+    return st.st_mtime_ns, st.st_size
+
+
+@lru_cache(maxsize=8)
+def _read_mkbase_rows(path: str, mtime_ns: int, size: int):
+    """Разбор ``data.txt`` формата mkbase в токены (кэш по файлу).
+
+    Возвращает ``(headers, rows)``: ``headers`` — токены всех комментариев,
+    начинающихся с ``x`` (кандидаты в заголовок), ``rows`` — токены числовых
+    строк. Кэш общий для колонок, поэтому ``Cext`` и ``Cback`` одного файла
+    разделяют один разбор (в цикле по ``m`` файлы запрашиваются попарно).
+    Размер кэша маленький намеренно: токены строк занимают много памяти
+    (заметно больше, чем сами числа), а держать их дольше, чем на время
+    обработки одного файла, не нужно — готовые ``TabularCrossSection``
+    кэшируются отдельно.
+    """
+    headers: list[tuple[str, ...]] = []
+    rows: list[list[str]] = []
+    with open(path, "r", encoding="utf-8") as fh:
+        for ln in fh:
+            s = ln.strip()
+            if not s:
+                continue
+            if s.startswith("#"):
+                toks = s.lstrip("#").split()
+                if toks and toks[0] == "x":
+                    headers.append(tuple(toks))
+                continue
+            rows.append(s.split())
+    return tuple(headers), tuple(rows)
+
+
+def _read_mkbase_column(path: str, mtime_ns: int, size: int,
+                        column: str) -> tuple[np.ndarray, np.ndarray]:
+    """Абсцисса ``x`` и колонка ``column`` из ``data.txt``."""
+    headers, rows = _read_mkbase_rows(path, mtime_ns, size)
+    header = next((h for h in headers if column in h), None)
+    if header is None:
+        raise ValueError(
+            f"{path}: не найден заголовок формата mkbase с колонками "
+            f"'x' и {column!r} (ожидается, например, "
+            f"'# x Cext Cabs Cback Qext Qabs Qback')")
+    ix = header.index("x")
+    ic = header.index(column)
+    need = max(ix, ic) + 1
+    short = next((t for t in rows if len(t) < need), None)
+    if short is not None:
+        raise ValueError(
+            f"{path}: в строке нет колонки {column!r}: {' '.join(short)!r}")
+    if len(rows) < 3:
+        raise ValueError(f"{path}: недостаточно точек (>= 3), найдено {len(rows)}")
+    xs = [float(t[ix]) for t in rows]
+    cs = [float(t[ic]) for t in rows]
+    return np.asarray(xs, float), np.asarray(cs, float)
+
+
+@lru_cache(maxsize=512)
+def _from_data_file_cached(path: str, mtime_ns: int, size: int, column: str,
+                           extrapolate: bool) -> "TabularCrossSection":
+    """Кэшированная сборка ``TabularCrossSection`` (см. ``from_data_file``)."""
+    x, C = _read_mkbase_column(path, mtime_ns, size, column)
+    return TabularCrossSection(x, C, extrapolate=extrapolate, path=path)
 
 
 def m_table_dirname(m: complex) -> str:
