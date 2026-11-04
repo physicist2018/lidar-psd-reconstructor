@@ -47,7 +47,9 @@ static void usage(void)
          "  --quad-order N            порядок Гаусса-Лежандра [24]\n"
          "  --log-span X              макс. ширина подсегмента в ln r [0.1]\n"
          "  --noise X --seed N        шум демо и зерно [0 1]\n"
-         "  --out PNG                 файл графика [result.png]\n"
+         "  --out FILE                файл графика [result.<fmt>]\n"
+         "  --plot-format FMT         формат: png, pdf, svg [png]\n"
+         "  --plot-dpi N              разрешение png/svg, dpi [150]\n"
          "  --json JSON               сохранить результаты\n"
          "  --no-plot                 не строить график\n"
          "  -h, --help                эта справка\n"
@@ -109,7 +111,9 @@ void parse_args(int argc, char **argv, args_t *a)
     a->quad_order = 24;
     a->log_span = 0.1;
     a->seed = 1;
-    a->out = "result.png";
+    a->out = NULL;
+    a->plot_format = PLOT_FMT_PNG;
+    a->plot_dpi = 150.0;
     a->lidar_ratio_w = 0.5;
     a->lidar_ratio_iter = 3;
 
@@ -258,6 +262,20 @@ void parse_args(int argc, char **argv, args_t *a)
             a->seed = parse_int(need_value(argc, argv, &i, inline_val, name), name);
         } else if (IS("--out")) {
             a->out = need_value(argc, argv, &i, inline_val, name);
+        } else if (IS("--plot-format")) {
+            const char *v = need_value(argc, argv, &i, inline_val, name);
+            if (strcmp(v, "png") == 0)
+                a->plot_format = PLOT_FMT_PNG;
+            else if (strcmp(v, "pdf") == 0)
+                a->plot_format = PLOT_FMT_PDF;
+            else if (strcmp(v, "svg") == 0)
+                a->plot_format = PLOT_FMT_SVG;
+            else
+                cs_fatal("--plot-format: ожидается png, pdf или svg, "
+                         "получено '%s'", v);
+        } else if (IS("--plot-dpi")) {
+            a->plot_dpi = parse_double(
+                need_value(argc, argv, &i, inline_val, name), name);
         } else if (IS("--json")) {
             a->json = need_value(argc, argv, &i, inline_val, name);
         } else if (IS("--no-plot")) {

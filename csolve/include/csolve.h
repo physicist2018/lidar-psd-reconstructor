@@ -350,9 +350,11 @@ typedef struct {
 
     double noise;
     int seed;
-    const char *out;
+    const char *out;          /* NULL => result.<fmt> */
     const char *json;
     int no_plot;
+    int plot_format;          /* PLOT_FMT_* */
+    double plot_dpi;
 
     const char *batch;
     const char *batch_out_dir;
@@ -392,6 +394,17 @@ void profile_free(profile_t *p);
 /* ------------------------------------------------------------------ */
 /* вывод                                                               */
 /* ------------------------------------------------------------------ */
+
+/* Формат сохраняемых изображений. */
+enum { PLOT_FMT_PNG = 0, PLOT_FMT_PDF = 1, PLOT_FMT_SVG = 2 };
+
+typedef struct {
+    int fmt;        /* PLOT_FMT_* */
+    double dpi;     /* плотность для png/svg (pdf — вектор) */
+} plot_opts_t;
+
+const char *plot_format_ext(int fmt);   /* "png" / "pdf" / "svg" */
+
 void report_summary(const args_t *a, const solutions_t *sols,
                     const double *g1, const channel_t *ch, int nch,
                     const double *n_avg, const double *g_fit,
@@ -407,7 +420,8 @@ void write_json(const char *path, const solutions_t *sols,
                 const double *g_fit, double m_avg_re, double m_avg_im,
                 const moments_t *mom, const modes_t *modes);
 
-int plot_results(const char *out_path, const double *r_grid, int nr,
+int plot_results(const plot_opts_t *po, const char *out_path,
+                 const double *r_grid, int nr,
                  const double *n_true, const double *n_avg,
                  const double *n_avg_raw, const double *n_best,
                  int n_best_count, const channel_t *ch, int nch,
@@ -415,22 +429,25 @@ int plot_results(const char *out_path, const double *r_grid, int nr,
                  double m_avg_re, double m_avg_im);
 
 /* Компактный график одной высоты пакетного режима (2 панели). */
-int plot_profile(const char *out_path, const double *r_grid, int nr,
-                 const double *n_avg, const channel_t *ch, int nch,
-                 const double *g1, const double *g_fit, double h);
+int plot_profile(const plot_opts_t *po, const char *out_path,
+                 const double *r_grid, int nr, const double *n_avg,
+                 const channel_t *ch, int nch, const double *g1,
+                 const double *g_fit, double h);
 
 /* Сводный вертикальный профиль показателя преломления по высотам:
  * одна панель, две оси X (низ — Re(m), верх — Im(m)), высота — по Y. */
-int plot_refractive_profile(const char *out_path, const double *alt,
-                            const double *m_re, const double *m_im, int n);
+int plot_refractive_profile(const plot_opts_t *po, const char *out_path,
+                            const double *alt, const double *m_re,
+                            const double *m_im, int n);
 
 /* Сводный вертикальный профиль произвольных величин: ось Y — высота,
  * ось X — значения (несколько серий). Логарифмическая шкала X
  * включается автоматически, если все значения положительны и их
  * размах больше 30x. NaN-значения пропускаются. */
-int plot_profiles(const char *out_path, const char *title,
-                  const char *xlabel, int n_series, const double *alt,
-                  const double *const *vals, const char *const *names, int n);
+int plot_profiles(const plot_opts_t *po, const char *out_path,
+                  const char *title, const char *xlabel, int n_series,
+                  const double *alt, const double *const *vals,
+                  const char *const *names, int n);
 
 /* ------------------------------------------------------------------ */
 /* пакетная обработка (--batch)                                        */

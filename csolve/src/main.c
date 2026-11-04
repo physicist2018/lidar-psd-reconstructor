@@ -249,6 +249,8 @@ int main(int argc, char **argv)
         cs_fatal("--gamma-rel должен быть >= 0");
     if (a.ngamma < 1)
         cs_fatal("--ngamma должен быть >= 1");
+    if (!(a.plot_dpi > 0.0))
+        cs_fatal("--plot-dpi должен быть > 0");
 
     qsort(a.degrees, (size_t)a.n_degrees, sizeof(int), cmp_int);
     int nd = 0;
@@ -486,9 +488,16 @@ int main(int argc, char **argv)
             for (int i = 0; i < prof.nr; i++)
                 n_true_vals[i] = n_true_fn(prof.r_grid[i]);
         }
-        plot_results(a.out, prof.r_grid, prof.nr, n_true_vals, prof.n_avg,
-                     prof.n_avg_raw, prof.n_best, prof.n_best_count,
-                     base_ch, nch, g1, prof.g_fit, prof.m_re, prof.m_im);
+        plot_opts_t po = {a.plot_format, a.plot_dpi};
+        char *out_path = a.out
+                             ? xstrdup(a.out)
+                             : xasprintf("result.%s",
+                                         plot_format_ext(a.plot_format));
+        plot_results(&po, out_path, prof.r_grid, prof.nr, n_true_vals,
+                     prof.n_avg, prof.n_avg_raw, prof.n_best,
+                     prof.n_best_count, base_ch, nch, g1, prof.g_fit,
+                     prof.m_re, prof.m_im);
+        free(out_path);
         free(n_true_vals);
     }
 

@@ -9,6 +9,48 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+const char *plot_format_ext(int fmt)
+{
+    switch (fmt) {
+    case PLOT_FMT_PDF:
+        return "pdf";
+    case PLOT_FMT_SVG:
+        return "svg";
+    default:
+        return "png";
+    }
+}
+
+/* Терминал gnuplot под выбранный формат. Размеры фигуры задаются
+ * в дюймах; для png/svg они переводятся в пиксели через dpi,
+ * для pdf передаются как есть (вектор). */
+static void set_terminal(FILE *f, const plot_opts_t *po, double w_in,
+                         double h_in)
+{
+    double dpi = po && po->dpi > 0.0 ? po->dpi : 150.0;
+    int fmt = po ? po->fmt : PLOT_FMT_PNG;
+    int wp = (int)(w_in * dpi + 0.5);
+    int hp = (int)(h_in * dpi + 0.5);
+    if (wp < 1)
+        wp = 1;
+    if (hp < 1)
+        hp = 1;
+    switch (fmt) {
+    case PLOT_FMT_PDF:
+        fprintf(f, "set terminal pdfcairo size %.3f,%.3f enhanced "
+                   "font 'DejaVu Sans,10'\n", w_in, h_in);
+        break;
+    case PLOT_FMT_SVG:
+        fprintf(f, "set terminal svg size %d,%d enhanced "
+                   "font 'DejaVu Sans,10'\n", wp, hp);
+        break;
+    default:
+        fprintf(f, "set terminal pngcairo size %d,%d enhanced "
+                   "font 'DejaVu Sans,10'\n", wp, hp);
+        break;
+    }
+}
+
 static void write_avg(const char *path, const double *r, const double *avg,
                       const double *raw, int n)
 {
@@ -64,9 +106,10 @@ static void write_bars(const char *path, const channel_t *ch, int nch,
     fclose(f);
 }
 
-int plot_profile(const char *out_path, const double *r_grid, int nr,
-                 const double *n_avg, const channel_t *ch, int nch,
-                 const double *g1, const double *g_fit, double h)
+int plot_profile(const plot_opts_t *po, const char *out_path,
+                 const double *r_grid, int nr, const double *n_avg,
+                 const channel_t *ch, int nch, const double *g1,
+                 const double *g_fit, double h)
 {
     char tmpl[256];
     int mk = 0;
@@ -110,8 +153,7 @@ int plot_profile(const char *out_path, const double *r_grid, int nr,
         return 0;
     }
     fputs("set encoding utf8\n", f);
-    fputs("set terminal pngcairo size 1200,460 enhanced "
-          "font 'DejaVu Sans,10'\n", f);
+    set_terminal(f, po, 8.0, 3.0667);
     fprintf(f, "set output \"%s\"\n", out_path);
     fputs("set datafile missing 'NaN'\n", f);
     fprintf(f, "set title 'H = %g м'\n", h);
@@ -153,8 +195,9 @@ int plot_profile(const char *out_path, const double *r_grid, int nr,
     return ok;
 }
 
-int plot_refractive_profile(const char *out_path, const double *alt,
-                            const double *m_re, const double *m_im, int n)
+int plot_refractive_profile(const plot_opts_t *po, const char *out_path,
+                            const double *alt, const double *m_re,
+                            const double *m_im, int n)
 {
     if (n <= 0)
         return 0;
@@ -239,8 +282,7 @@ int plot_refractive_profile(const char *out_path, const double *alt,
         return 0;
     }
     fputs("set encoding utf8\n", f);
-    fputs("set terminal pngcairo size 900,720 enhanced "
-          "font 'DejaVu Sans,10'\n", f);
+    set_terminal(f, po, 6.0, 4.8);
     fprintf(f, "set output \"%s\"\n", out_path);
     fputs("set datafile missing 'NaN'\n", f);
     fputs("set xlabel 'Re(m)'\n", f);
@@ -279,9 +321,10 @@ int plot_refractive_profile(const char *out_path, const double *alt,
     return ok;
 }
 
-int plot_profiles(const char *out_path, const char *title,
-                  const char *xlabel, int n_series, const double *alt,
-                  const double *const *vals, const char *const *names, int n)
+int plot_profiles(const plot_opts_t *po, const char *out_path,
+                  const char *title, const char *xlabel, int n_series,
+                  const double *alt, const double *const *vals,
+                  const char *const *names, int n)
 {
     if (n <= 0 || n_series <= 0)
         return 0;
@@ -384,8 +427,7 @@ int plot_profiles(const char *out_path, const char *title,
         return 0;
     }
     fputs("set encoding utf8\n", f);
-    fputs("set terminal pngcairo size 900,720 enhanced "
-          "font 'DejaVu Sans,10'\n", f);
+    set_terminal(f, po, 6.0, 4.8);
     fprintf(f, "set output \"%s\"\n", out_path);
     fputs("set datafile missing 'NaN'\n", f);
     fprintf(f, "set title '%s'\n", title);
@@ -426,7 +468,8 @@ int plot_profiles(const char *out_path, const char *title,
     return ok;
 }
 
-int plot_results(const char *out_path, const double *r_grid, int nr,
+int plot_results(const plot_opts_t *po, const char *out_path,
+                 const double *r_grid, int nr,
                  const double *n_true, const double *n_avg,
                  const double *n_avg_raw, const double *n_best,
                  int n_best_count, const channel_t *ch, int nch,
@@ -471,8 +514,7 @@ int plot_results(const char *out_path, const double *r_grid, int nr,
         return 0;
     }
     fputs("set encoding utf8\n", f);
-    fputs("set terminal pngcairo size 1300,520 enhanced "
-          "font 'DejaVu Sans,10'\n", f);
+    set_terminal(f, po, 8.6667, 3.4667);
     fprintf(f, "set output \"%s\"\n", out_path);
     fputs("set datafile missing 'NaN'\n", f);
     fputs("set multiplot layout 1,2\n", f);
