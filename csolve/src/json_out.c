@@ -27,7 +27,7 @@ void write_json(const char *path, const solutions_t *sols,
 {
     FILE *f = fopen(path, "w");
     if (!f)
-        cs_fatal("не удалось открыть файл для записи: %s", path);
+        cs_fatal("failed to open file for writing: %s", path);
 
     fputs("{\n  \"m_avg\": {\"real\": ", f);
     wnum(f, m_avg_re);
@@ -42,8 +42,8 @@ void write_json(const char *path, const solutions_t *sols,
     fputs(",\n    \"r_cov_min_um\": ", f); wnum(f, mom->r_cov_min_um);
     fputs(",\n    \"r_cov_max_um\": ", f); wnum(f, mom->r_cov_max_um);
     fputs(",\n    \"cov_frac\": ", f); wnum(f, mom->cov_frac);
-    fputs("\n  },\n  \"units_input\": {\"beta\": \"1/(м*ср)\", "
-          "\"alpha\": \"1/м\"},\n  \"channels\": [\n", f);
+    fputs("\n  },\n  \"units_input\": {\"beta\": \"1/(m·sr)\", "
+          "\"alpha\": \"1/m\"},\n  \"channels\": [\n", f);
     for (int j = 0; j < nch; j++) {
         fprintf(f, "    {\"kind\": \"%s\", \"wl_nm\": ",
                 ch[j].kind == CH_BETA ? "beta" : "alpha");

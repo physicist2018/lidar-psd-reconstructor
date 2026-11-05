@@ -125,7 +125,7 @@ static cs_mode_t analyze(const double *r, const double *f, const double *w,
     out.rm = NAN;
     out.sigma = NAN;
     out.ok = 0;
-    out.method = "недостаточно точек";
+    out.method = "insufficient points";
     if (n < 3)
         return out;
     double *fr = dbl_array(n);
@@ -138,7 +138,7 @@ static cs_mode_t analyze(const double *r, const double *f, const double *w,
     free(fr);
     free(lnr);
     if (!(v > 0.0) || !isfinite(v)) {
-        out.method = "нет положительного объёма";
+        out.method = "no positive volume";
         return out;
     }
     out.V = v;
@@ -148,7 +148,7 @@ static cs_mode_t analyze(const double *r, const double *f, const double *w,
         if (f[i] > 0.0)
             pos[np++] = i;
     if (np < 3) {
-        out.method = "мало точек с F > 0";
+        out.method = "few points with F > 0";
         return out;
     }
     if (method != 2) {
@@ -256,7 +256,7 @@ modes_t mode_analysis(const double *r_grid, const double *f_avg, int n,
         memset(&bad, 0, sizeof(bad));
         bad.V = bad.rm = bad.sigma = NAN;
         bad.ok = 0;
-        bad.method = "недостаточно точек";
+        bad.method = "insufficient points";
         out.fine = out.coarse = out.overall = bad;
         free(r);
         free(f);

@@ -8,7 +8,7 @@ void cs_fatal(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-    fputs("ошибка: ", stderr);
+    fputs("error: ", stderr);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
     fputc('\n', stderr);
@@ -19,7 +19,7 @@ void *xmalloc(size_t n)
 {
     void *p = malloc(n ? n : 1);
     if (!p)
-        cs_fatal("не хватает памяти (%zu байт)", n);
+        cs_fatal("out of memory (%zu bytes)", n);
     return p;
 }
 
@@ -27,7 +27,7 @@ void *xcalloc(size_t n, size_t size)
 {
     void *p = calloc(n ? n : 1, size ? size : 1);
     if (!p)
-        cs_fatal("не хватает памяти (%zu x %zu байт)", n, size);
+        cs_fatal("out of memory (%zu x %zu bytes)", n, size);
     return p;
 }
 
@@ -35,7 +35,7 @@ void *xrealloc(void *p, size_t n)
 {
     void *q = realloc(p, n ? n : 1);
     if (!q)
-        cs_fatal("не хватает памяти (%zu байт)", n);
+        cs_fatal("out of memory (%zu bytes)", n);
     return q;
 }
 
@@ -55,7 +55,7 @@ char *xasprintf(const char *fmt, ...)
     int n = vsnprintf(NULL, 0, fmt, ap);
     va_end(ap);
     if (n < 0)
-        cs_fatal("ошибка форматирования строки");
+        cs_fatal("string formatting error");
     char *p = xmalloc((size_t)n + 1);
     vsnprintf(p, (size_t)n + 1, fmt, ap2);
     va_end(ap2);

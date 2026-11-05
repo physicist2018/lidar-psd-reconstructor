@@ -41,7 +41,7 @@ static void utf8_put(char **out, unsigned cp)
 static char *parse_string(jp_t *p)
 {
     if (*p->s != '"')
-        cs_fatal("JSON: ожидалась строка");
+        cs_fatal("JSON: expected a string");
     p->s++;
     size_t cap = strlen(p->s) + 1;
     char *buf = xmalloc(cap);
@@ -63,7 +63,7 @@ static char *parse_string(jp_t *p)
                 char hex[5] = {0};
                 for (int i = 0; i < 4; i++) {
                     if (!isxdigit((unsigned char)*p->s))
-                        cs_fatal("JSON: некорректный \\u escape");
+                        cs_fatal("JSON: invalid \\u escape");
                     hex[i] = *p->s++;
                 }
                 unsigned cp = (unsigned)strtoul(hex, NULL, 16);
@@ -71,14 +71,14 @@ static char *parse_string(jp_t *p)
                 break;
             }
             default:
-                cs_fatal("JSON: неизвестный escape \\%c", e);
+                cs_fatal("JSON: unknown escape \\%c", e);
             }
         } else {
             *o++ = c;
         }
     }
     if (*p->s != '"')
-        cs_fatal("JSON: незавершённая строка");
+        cs_fatal("JSON: unterminated string");
     p->s++;
     *o = '\0';
     return buf;
@@ -108,7 +108,7 @@ static jval_t *parse_array(jp_t *p)
             p->s++;
             return v;
         }
-        cs_fatal("JSON: ожидалась ',' или ']'");
+        cs_fatal("JSON: expected ',' or ']'");
     }
 }
 
@@ -126,7 +126,7 @@ static jval_t *parse_object(jp_t *p)
         char *key = parse_string(p);
         skip_ws(p);
         if (*p->s != ':')
-            cs_fatal("JSON: ожидалось ':'");
+            cs_fatal("JSON: expected ':'");
         p->s++;
         jval_t *val = parse_value(p);
         v->keys = xrealloc(v->keys, sizeof(char *) * (size_t)(v->nk + 1));
@@ -143,7 +143,7 @@ static jval_t *parse_object(jp_t *p)
             p->s++;
             return v;
         }
-        cs_fatal("JSON: ожидалась ',' или '}'");
+        cs_fatal("JSON: expected ',' or '}'");
     }
 }
 
@@ -178,7 +178,7 @@ static jval_t *parse_value(jp_t *p)
     char *end = NULL;
     double d = strtod(p->s, &end);
     if (end == p->s)
-        cs_fatal("JSON: неожиданный символ '%c'", *p->s);
+        cs_fatal("JSON: unexpected character '%c'", *p->s);
     p->s = end;
     jval_t *v = new_val(JNUM);
     v->num = d;
@@ -191,7 +191,7 @@ jval_t *json_parse(const char *text)
     jval_t *v = parse_value(&p);
     skip_ws(&p);
     if (*p.s)
-        cs_fatal("JSON: лишние данные после значения");
+        cs_fatal("JSON: trailing data after value");
     return v;
 }
 

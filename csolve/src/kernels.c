@@ -14,14 +14,14 @@ void ktable_build(ktable_t *kt, const channels_t *chs, double r_min,
     memset(kt, 0, sizeof(*kt));
     int nch = chs->n;
     if (nch <= 0)
-        cs_fatal("нет ни одного канала");
+        cs_fatal("no channels");
     double lam_min = chs->ch[0].wl_um;
     for (int j = 1; j < nch; j++)
         if (chs->ch[j].wl_um < lam_min)
             lam_min = chs->ch[j].wl_um;
     double dr = dx_max * lam_min / (2.0 * CS_PI);
     if (!(dr > 0.0))
-        cs_fatal("некорректный шаг сетки r (dx-max = %g)", dx_max);
+        cs_fatal("invalid grid step r (dx-max = %g)", dx_max);
 
     int n = (int)ceil((r_max - r_min) / dr);
     if (n < 0)
@@ -47,7 +47,8 @@ void ktable_build(ktable_t *kt, const channels_t *chs, double r_min,
     for (int j = 0; j < nch; j++) {
         const channel_t *ch = &chs->ch[j];
         if (!ch->tab)
-            cs_fatal("Mie-режим не поддерживается C-версией — задайте --tables");
+            cs_fatal("Mie mode is not supported by the C version — specify "
+                     "--tables");
         double scale = UM2_TO_M2 * pow(ch->wl_um / ch->ref_wl_um, 2.0);
         for (int i = 0; i < nr; i++) {
             double x = 2.0 * CS_PI * r[i] / ch->wl_um;
@@ -56,8 +57,8 @@ void ktable_build(ktable_t *kt, const channels_t *chs, double r_min,
             if (ch->kind == CH_BETA)
                 K *= ch->cback_scale;
             if (!(K > 0.0))
-                cs_fatal("ядро K(r) должно быть строго положительным на сетке "
-                         "(канал %d, r = %g)", j, r[i]);
+                cs_fatal("kernel K(r) must be strictly positive on the grid "
+                         "(channel %d, r = %g)", j, r[i]);
             val[i] = log(K);
         }
         spline_init(&kt->sp[j], lr, val, nr);

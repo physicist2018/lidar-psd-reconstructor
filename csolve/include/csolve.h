@@ -102,8 +102,6 @@ char *m_table_dirname(double re, double im);
 int parse_m_dirname(const char *name, double *re, double *im);
 
 void table_m_grid(const char *root,
-                  const double *m_reals, int n_reals,
-                  const double *m_imags, int n_imags,
                   double **out_re, double **out_im, int *out_n);
 
 /* ------------------------------------------------------------------ */
@@ -321,7 +319,7 @@ typedef struct {
     double table_ref_wl;
     int table_cback_4pi;
 
-    int degrees[8];
+    int degrees[8];            /* степени B-сплайнов: 1..4 */
     int n_degrees;
     int n_basis;               /* 0 => авто */
     double r0_min, r0_max; int nr0;
@@ -345,8 +343,6 @@ typedef struct {
 
     int has_m_real, has_m_imag;
     double m_real, m_imag;
-    double *m_reals, *m_imags;
-    int n_m_reals, n_m_imags;
 
     double noise;
     int seed;
@@ -355,6 +351,7 @@ typedef struct {
     int no_plot;
     int plot_format;          /* PLOT_FMT_* */
     double plot_dpi;
+    double plot_font_size;    /* 0 => как в терминале */
 
     const char *batch;
     const char *batch_out_dir;
@@ -364,7 +361,6 @@ typedef struct {
 } args_t;
 
 void parse_args(int argc, char **argv, args_t *a);
-void args_free(args_t *a);
 
 /* ------------------------------------------------------------------ */
 /* итоговый профиль одной высоты (общий для одиночного и пакетного)     */
@@ -401,6 +397,7 @@ enum { PLOT_FMT_PNG = 0, PLOT_FMT_PDF = 1, PLOT_FMT_SVG = 2 };
 typedef struct {
     int fmt;        /* PLOT_FMT_* */
     double dpi;     /* плотность для png/svg (pdf — вектор) */
+    double font_size; /* размер подписей осей и серий, 0 => по умолчанию */
 } plot_opts_t;
 
 const char *plot_format_ext(int fmt);   /* "png" / "pdf" / "svg" */

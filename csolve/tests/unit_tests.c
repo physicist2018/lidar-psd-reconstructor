@@ -68,14 +68,14 @@ static void test_gl(void)
         s8 += w[i] * pow(x[i], 8);
         s2 += w[i] * x[i] * x[i];
     }
-    check_close("Гаусс-Лежандр: int x^8 = 2/9", s8, 2.0 / 9.0, 1e-14);
-    check_close("Гаусс-Лежандр: int x^2 = 2/3", s2, 2.0 / 3.0, 1e-14);
+    check_close("Gauss-Legendre: int x^8 = 2/9", s8, 2.0 / 9.0, 1e-14);
+    check_close("Gauss-Legendre: int x^2 = 2/3", s2, 2.0 / 3.0, 1e-14);
     /* узлы по возрастанию */
     int asc = 1;
     for (int i = 1; i < order; i++)
         if (!(x[i] > x[i - 1]))
             asc = 0;
-    check("Гаусс-Лежандр: узлы возрастают", asc);
+    check("Gauss-Legendre: nodes increase", asc);
     free(x);
     free(w);
 }
@@ -89,7 +89,7 @@ static void test_quadrature(void)
     double s = 0.0;
     for (int i = 0; i < n; i++)
         s += weights[i] / nodes[i];
-    check_close("квадратура: int_1^2 dx/x = ln2", s, log(2.0), 1e-12);
+    check_close("quadrature: int_1^2 dx/x = ln2", s, log(2.0), 1e-12);
     free(nodes);
     free(weights);
 }
@@ -112,7 +112,7 @@ static void test_bspline(void)
         if (fabs(s - 1.0) > 1e-12)
             ok = 0;
     }
-    check("B-сплайны: разбиение единицы и неотрицательность", ok);
+    check("B-splines: partition of unity and non-negativity", ok);
     /* в узлах квадратуры матрица values тоже даёт разбиение единицы */
     int ok2 = 1;
     for (int q = 0; q < g.n_nodes; q++) {
@@ -122,7 +122,7 @@ static void test_bspline(void)
         if (fabs(s - 1.0) > 1e-12)
             ok2 = 0;
     }
-    check("B-сплайны: разбиение единицы в узлах квадратуры", ok2);
+    check("B-splines: partition of unity at quadrature nodes", ok2);
     free(full);
     geom_free(&g);
 }
@@ -149,7 +149,7 @@ static void test_band_chol(void)
     for (int i = 0; i < n; i++)
         if (fabs(x[i] - xt[i]) > 1e-12)
             ok = 0;
-    check("ленточная Холецкого: решение SPD-системы", ok);
+    check("banded Cholesky: SPD system solution", ok);
 }
 
 static void test_nnls(void)
@@ -158,25 +158,25 @@ static void test_nnls(void)
     double b[3] = {1.0, -1.0, 0.0};
     double x[2];
     nnls(a, 3, 2, b, x);
-    check_close("NNLS: x[1] = 0 (граница)", x[1], 0.0, 1e-10);
+    check_close("NNLS: x[1] = 0 (boundary)", x[1], 0.0, 1e-10);
     check_close("NNLS: x[0] = 0.5", x[0], 0.5, 1e-10);
 }
 
 static void test_dirname(void)
 {
     char *d1 = m_table_dirname(1.45, -0.005);
-    check("имя каталога m (обычное)",
+    check("directory name m (regular)",
           strcmp(d1, "mre_1.45_mim_-0.00500") == 0);
     free(d1);
     char *d2 = m_table_dirname(1.45, -0.0);
-    check("имя каталога m (отрицательный ноль)",
+    check("directory name m (negative zero)",
           strcmp(d2, "mre_1.45_mim_0.00000") == 0);
     free(d2);
     double re = 0, im = 0;
-    check("разбор имени каталога", parse_m_dirname("mre_1.45_mim_-0.00500", &re, &im));
-    check_close("разбор имени: Re", re, 1.45, 1e-15);
-    check_close("разбор имени: Im", im, -0.005, 1e-15);
-    check("разбор имени: постороннее имя",
+    check("directory name parsing", parse_m_dirname("mre_1.45_mim_-0.00500", &re, &im));
+    check_close("name parsing: Re", re, 1.45, 1e-15);
+    check_close("name parsing: Im", im, -0.005, 1e-15);
+    check("name parsing: unrelated name",
           !parse_m_dirname("average", &re, &im));
 }
 
@@ -185,7 +185,7 @@ static void test_table_parse(void)
     const char *path = "/tmp/csolve_unit_table.txt";
     FILE *f = fopen(path, "w");
     if (!f) {
-        check("таблица: создать временный файл", 0);
+        check("table: create temporary file", 0);
         return;
     }
     fputs("# Units: x (dimless), C (um^2)\n"
@@ -196,12 +196,12 @@ static void test_table_parse(void)
           "2.0 10.0 16.0 0.8 5\n", f);
     fclose(f);
     table_t *t = table_load(path, 0);
-    check("таблица: обе колонки найдены", t->has_cext && t->has_cback);
-    check_close("таблица: x_min", t->x_min, 0.1, 1e-15);
-    check_close("таблица: x_max", t->x_max, 2.0, 1e-15);
-    check_close("таблица: Cext в узле", table_cross_section(t, 0, 0.5), 2.0, 1e-12);
-    check_close("таблица: Cback в узле", table_cross_section(t, 1, 1.0), 9.0, 1e-12);
-    check_close("таблица: интерполяция внутри",
+    check("table: both columns found", t->has_cext && t->has_cback);
+    check_close("table: x_min", t->x_min, 0.1, 1e-15);
+    check_close("table: x_max", t->x_max, 2.0, 1e-15);
+    check_close("table: Cext at node", table_cross_section(t, 0, 0.5), 2.0, 1e-12);
+    check_close("table: Cback at node", table_cross_section(t, 1, 1.0), 9.0, 1e-12);
+    check_close("table: interpolation inside",
                 table_cross_section(t, 0, 0.25), 1.5, 0.2);
     table_free(t);
     remove(path);
@@ -225,7 +225,7 @@ static void test_smoothing(void)
     for (int i = 0; i < 8; i++)
         if (fabs(n_avg[i] - want[i]) > 1e-9 * fabs(want[i]) + 1e-12)
             ok = 0;
-    check("сглаживание: совпадение с scipy make_smoothing_spline", ok);
+    check("smoothing: matches scipy make_smoothing_spline", ok);
     if (!ok)
         for (int i = 0; i < 8; i++)
             printf("   [%d] got %.17g want %.17g\n", i, n_avg[i], want[i]);
@@ -246,10 +246,70 @@ static void test_smoothing_lam1(void)
     for (int i = 0; i < 7; i++)
         if (fabs(out[i] - want[i]) > 1e-9 * fabs(want[i]) + 1e-12)
             ok = 0;
-    check("сглаживание lam=1.0 без весов (опорный профиль S)", ok);
+    check("smoothing lam=1.0 without weights (reference profile S)", ok);
     if (!ok)
         for (int i = 0; i < 7; i++)
             printf("   [%d] got %.17g want %.17g\n", i, out[i], want[i]);
+}
+
+static void test_args(void)
+{
+    /* значения по умолчанию (--tables обязателен) */
+    {
+        char *argv[] = {(char *)"csolve", (char *)"--tables", (char *)"dir"};
+        args_t a;
+        parse_args(3, argv, &a);
+        check("args: --tables", a.tables && strcmp(a.tables, "dir") == 0);
+        check("args: default degrees 1 2 3 4",
+              a.n_degrees == 4 && a.degrees[0] == 1 &&
+                  a.degrees[1] == 2 && a.degrees[2] == 3 &&
+                  a.degrees[3] == 4);
+        check_close("args: plot-dpi default", a.plot_dpi, 150.0, 0.0);
+        check_close("args: plot-font-size default",
+                    a.plot_font_size, 0.0, 0.0);
+    }
+
+    /* степени 1..4, форма --opt=value, размер шрифта */
+    {
+        char *argv[] = {(char *)"csolve", (char *)"--tables", (char *)"dir",
+                        (char *)"--degree", (char *)"2",
+                        (char *)"--plot-font-size=14",
+                        (char *)"--r1-min=0.5", (char *)"--nonneg"};
+        args_t a;
+        parse_args(8, argv, &a);
+        check("args: --degree 2 gives one degree",
+              a.n_degrees == 1 && a.degrees[0] == 2);
+        check_close("args: --plot-font-size=14", a.plot_font_size, 14.0, 0.0);
+        check_close("args: --r1-min=0.5", a.r1_min, 0.5, 0.0);
+        check("args: --nonneg", a.nonneg == 1);
+    }
+
+    /* список степеней через пробел */
+    {
+        char *argv[] = {(char *)"csolve", (char *)"--tables", (char *)"dir",
+                        (char *)"--degree", (char *)"1", (char *)"2",
+                        (char *)"3", (char *)"4"};
+        args_t a;
+        parse_args(8, argv, &a);
+        check("args: --degree 1 2 3 4 gives four degrees",
+              a.n_degrees == 4 && a.degrees[0] == 1 &&
+                  a.degrees[1] == 2 && a.degrees[2] == 3 &&
+                  a.degrees[3] == 4);
+    }
+
+    /* строки и перечисления */
+    {
+        char *argv[] = {(char *)"csolve", (char *)"--tables", (char *)"dir",
+                        (char *)"--table-cback", (char *)"4pi",
+                        (char *)"--plot-format", (char *)"pdf",
+                        (char *)"--modes", (char *)"stat"};
+        args_t a;
+        parse_args(9, argv, &a);
+        check("args: --tables", a.tables && strcmp(a.tables, "dir") == 0);
+        check("args: --table-cback 4pi", a.table_cback_4pi == 1);
+        check("args: --plot-format pdf", a.plot_format == PLOT_FMT_PDF);
+        check("args: --modes stat", a.modes == 2);
+    }
 }
 
 int main(void)
@@ -265,7 +325,8 @@ int main(void)
     test_table_parse();
     test_smoothing();
     test_smoothing_lam1();
-    printf("\n%s (%d ошибок)\n", failures ? "ПРОВАЛ" : "все тесты пройдены",
+    test_args();
+    printf("\n%s (%d failures)\n", failures ? "FAILED" : "all tests passed",
            failures);
     return failures ? 1 : 0;
 }

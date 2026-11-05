@@ -130,7 +130,7 @@ table_t *table_load(const char *path, int extrapolate)
 {
     FILE *fh = fopen(path, "r");
     if (!fh)
-        cs_fatal("файл таблицы сечений не найден: %s", path);
+        cs_fatal("cross-section table file not found: %s", path);
 
     int ix_ext = -1, ic_ext = -1, ix_back = -1, ic_back = -1;
     char *line = NULL;
@@ -170,15 +170,15 @@ table_t *table_load(const char *path, int extrapolate)
     if (ic_ext < 0 && ic_back < 0) {
         fclose(fh);
         free(line);
-        cs_fatal("%s: не найден заголовок формата mkbase с колонками "
-                 "'x' и 'Cext' (ожидается, например, "
+        cs_fatal("%s: mkbase-format header with columns "
+                 "'x' and 'Cext' not found (expected, for example, "
                  "'# x Cext Cabs Cback Qext Qabs Qback')", path);
     }
     if (ic_ext >= 0 && ic_back >= 0 && ix_ext != ix_back) {
         fclose(fh);
         free(line);
-        cs_fatal("%s: столбцы Cext и Cback взяты из заголовков с разными "
-                 "позициями x — неоднозначный формат таблицы", path);
+        cs_fatal("%s: columns Cext and Cback come from headers with "
+                 "different x positions — ambiguous table format", path);
     }
 
     int ix = ic_ext >= 0 ? ix_ext : ix_back;
@@ -208,7 +208,7 @@ table_t *table_load(const char *path, int extrapolate)
             free(xs.v);
             free(ve.v);
             free(vb.v);
-            cs_fatal("%s: в строке нет нужной колонки: '%s'", path, s);
+            cs_fatal("%s: no required column in row: '%s'", path, s);
         }
         dvec_push(&xs, strtod(toks[ix], NULL));
         if (ic_ext >= 0)
@@ -224,14 +224,14 @@ table_t *table_load(const char *path, int extrapolate)
         free(xs.v);
         free(ve.v);
         free(vb.v);
-        cs_fatal("%s: недостаточно точек (>= 3), найдено %d", path, n);
+        cs_fatal("%s: insufficient points (>= 3), found %d", path, n);
     }
     for (int i = 1; i < n; i++) {
         if (!(xs.v[i] > xs.v[i - 1])) {
             free(xs.v);
             free(ve.v);
             free(vb.v);
-            cs_fatal("%s: x должен строго возрастать", path);
+            cs_fatal("%s: x must be strictly increasing", path);
         }
     }
     for (int i = 0; i < n; i++) {
@@ -239,13 +239,13 @@ table_t *table_load(const char *path, int extrapolate)
             free(xs.v);
             free(ve.v);
             free(vb.v);
-            cs_fatal("%s: сечения Cext должны быть > 0 и конечными", path);
+            cs_fatal("%s: Cext cross sections must be > 0 and finite", path);
         }
         if (ic_back >= 0 && (!(vb.v[i] > 0.0) || !isfinite(vb.v[i]))) {
             free(xs.v);
             free(ve.v);
             free(vb.v);
-            cs_fatal("%s: сечения Cback должны быть > 0 и конечными", path);
+            cs_fatal("%s: Cback cross sections must be > 0 and finite", path);
         }
     }
     double dx_max = 0.0;
@@ -255,8 +255,8 @@ table_t *table_load(const char *path, int extrapolate)
             dx_max = d;
     }
     if (dx_max > 1.0)
-        fprintf(stderr, "[предупреждение] таблица %s: крупный шаг по x "
-                        "(max \xce\x94x = %g); рипл Mie может быть не разрешён\n",
+        fprintf(stderr, "[warning] table %s: large step in x "
+                        "(max \xce\x94x = %g); Mie ripple may not be resolved\n",
                 path, dx_max);
 
     table_t *t = xcalloc(1, sizeof(*t));
@@ -298,8 +298,8 @@ void table_free(table_t *t)
 double table_cross_section(const table_t *t, int use_cback, double x)
 {
     if (!t->extrapolate && (x < t->x_min || x > t->x_max))
-        cs_fatal("параметр размера x вне диапазона таблицы [%g, %g] — "
-                 "увеличьте диапазон таблиц или включите --table-extrapolate (%s)",
+        cs_fatal("size parameter x outside table range [%g, %g] — "
+                 "extend the table range or enable --table-extrapolate (%s)",
                  t->x_min, t->x_max, t->path);
     const spline_t *sp = use_cback ? &t->sp_cback : &t->sp_cext;
     return exp(spline_eval(sp, log(x)));
@@ -373,7 +373,7 @@ static int str_cmp(const void *a, const void *b)
 static char *layout_hint(const char *root)
 {
     if (!dir_exists(root))
-        return xasprintf("; каталог %s отсутствует", root);
+        return xasprintf("; directory %s does not exist", root);
     DIR *d = opendir(root);
     if (!d)
         return xstrdup("");
@@ -409,8 +409,8 @@ static char *layout_hint(const char *root)
         free(joined);
         joined = tmp;
     }
-    char *hint = xasprintf("; %s содержит %s — укажите --tables %s/average "
-                           "или --tables <root>/<shapeNN>", root, joined, root);
+    char *hint = xasprintf("; %s contains %s — specify --tables %s/average "
+                           "or --tables <root>/<shapeNN>", root, joined, root);
     free(joined);
     for (int i = 0; i < n; i++)
         free(names[i]);
@@ -435,92 +435,35 @@ static char *m_values_str(const mv_t *v, int n)
     return out;
 }
 
-void table_m_grid(const char *root,
-                  const double *m_reals, int n_reals,
-                  const double *m_imags, int n_imags,
-                  double **out_re, double **out_im, int *out_n)
+void table_m_grid(const char *root, double **out_re, double **out_im,
+                  int *out_n)
 {
     int nav = 0;
     mv_t *avail = collect_available(root, &nav);
     if (!dir_exists(root)) {
         free(avail);
         char *hint = layout_hint(root);
-        char *msg = xasprintf("каталог таблиц не найден: %s%s", root, hint);
+        char *msg = xasprintf("table directory not found: %s%s", root, hint);
         free(hint);
         cs_fatal("%s", msg);
     }
     if (nav == 0) {
         free(avail);
         char *hint = layout_hint(root);
-        char *msg = xasprintf("в каталоге таблиц %s нет ни одного подкаталога "
+        char *msg = xasprintf("table directory %s contains no subdirectories "
                               "mre_<real>_mim_<imag>/data.txt%s", root, hint);
         free(hint);
         cs_fatal("%s", msg);
     }
-    int *keep = int_array(nav);
-    int nk = nav;
-    for (int i = 0; i < nav; i++)
-        keep[i] = 1;
-    if (m_reals && n_reals > 0) {
-        nk = 0;
-        for (int i = 0; i < nav; i++) {
-            int hit = 0;
-            char key[64];
-            snprintf(key, sizeof(key), "%.2f", avail[i].re);
-            for (int j = 0; j < n_reals; j++) {
-                char want[64];
-                snprintf(want, sizeof(want), "%.2f", m_reals[j]);
-                if (strcmp(key, want) == 0) {
-                    hit = 1;
-                    break;
-                }
-            }
-            keep[i] = hit;
-            nk += hit;
-        }
-    }
-    if (m_imags && n_imags > 0) {
-        int cnt = 0;
-        for (int i = 0; i < nav; i++) {
-            if (!keep[i])
-                continue;
-            char key[64];
-            snprintf(key, sizeof(key), "%.5f", avail[i].im);
-            int hit = 0;
-            for (int j = 0; j < n_imags; j++) {
-                char want[64];
-                snprintf(want, sizeof(want), "%.5f", m_imags[j]);
-                if (strcmp(key, want) == 0) {
-                    hit = 1;
-                    break;
-                }
-            }
-            keep[i] = hit;
-            cnt += hit;
-        }
-        nk = cnt;
-    }
-    if (nk == 0) {
-        char *list = m_values_str(avail, nav);
-        free(keep);
-        free(avail);
-        cs_fatal("в таблицах %s нет m, удовлетворяющих --m-reals/--m-imags; "
-                 "доступные m: %s", root, list);
-    }
-    double *re = dbl_array(nk), *im = dbl_array(nk);
-    int k = 0;
+    double *re = dbl_array(nav), *im = dbl_array(nav);
     for (int i = 0; i < nav; i++) {
-        if (!keep[i])
-            continue;
-        re[k] = avail[i].re;
-        im[k] = avail[i].im;
-        k++;
+        re[i] = avail[i].re;
+        im[i] = avail[i].im;
     }
-    free(keep);
     free(avail);
     *out_re = re;
     *out_im = im;
-    *out_n = nk;
+    *out_n = nav;
 }
 
 /* ---------------- кэш загруженных таблиц ---------------- */
@@ -538,8 +481,8 @@ static void missing_table_error(const char *root, const char *mdir,
                                 double mre, double mim)
 {
     char *dir = m_table_dirname(mre, mim);
-    char *msg = xasprintf("каталог таблиц не найден: %s (ожидается "
-                          "%s/data.txt — формат mkbase/mkbase_spheres)",
+    char *msg = xasprintf("table directory not found: %s (expected "
+                          "%s/data.txt — mkbase/mkbase_spheres format)",
                           mdir, dir);
     free(dir);
     if (!dir_exists(root)) {
@@ -550,7 +493,7 @@ static void missing_table_error(const char *root, const char *mdir,
     mv_t *avail = collect_available(root, &nav);
     if (nav > 0) {
         char *list = m_values_str(avail, nav);
-        cs_fatal("%s; доступные m в %s: %s", msg, root, list);
+        cs_fatal("%s; available m in %s: %s", msg, root, list);
     }
     free(avail);
     char *hint = layout_hint(root);
@@ -609,13 +552,13 @@ void load_table_channels(const char *root, double mre, double mim,
         ch.ref_wl_um = ref_wl;
         ch.cback_scale = ch.kind == CH_BETA ? cback_scale : 1.0;
         if (ch.kind == CH_ALPHA && !tab->has_cext) {
-            cs_fatal("%s: не найден заголовок формата mkbase с колонками "
-                     "'x' и 'Cext' (ожидается, например, "
+            cs_fatal("%s: mkbase-format header with columns "
+                     "'x' and 'Cext' not found (expected, for example, "
                      "'# x Cext Cabs Cback Qext Qabs Qback')", tab->path);
         }
         if (ch.kind == CH_BETA && !tab->has_cback) {
-            cs_fatal("%s: не найден заголовок формата mkbase с колонками "
-                     "'x' и 'Cback' (ожидается, например, "
+            cs_fatal("%s: mkbase-format header with columns "
+                     "'x' and 'Cback' not found (expected, for example, "
                      "'# x Cext Cabs Cback Qext Qabs Qback')", tab->path);
         }
         out->ch[i] = ch;

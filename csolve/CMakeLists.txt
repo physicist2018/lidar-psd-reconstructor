@@ -27,10 +27,11 @@ set(CORE_SRC
     src/json_out.c
     src/report.c
     src/plot.c
-    src/cli.c)
+    src/cli.c
+    third_party/argtable3/argtable3.c)
 
 add_library(csolve_core STATIC ${CORE_SRC})
-target_include_directories(csolve_core PUBLIC include)
+target_include_directories(csolve_core PUBLIC include third_party/argtable3)
 target_link_libraries(csolve_core PUBLIC m)
 
 add_executable(csolve src/main.c)

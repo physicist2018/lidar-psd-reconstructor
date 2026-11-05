@@ -1,9 +1,9 @@
 CC      ?= cc
-CFLAGS  ?= -O2 -std=c11 -Wall -Wextra -Iinclude
+CFLAGS  ?= -O2 -std=c11 -Wall -Wextra -Iinclude -Ithird_party/argtable3
 LDFLAGS ?=
 LDLIBS  ?= -lm
 
-SRC := $(wildcard src/*.c)
+SRC := $(wildcard src/*.c) third_party/argtable3/argtable3.c
 OBJ := $(SRC:.c=.o)
 DEP := $(OBJ:.o=.d)
 BIN := csolve
@@ -16,8 +16,9 @@ $(BIN): $(OBJ)
 	$(CC) $(CFLAGS) -o $@ $(OBJ) $(LDFLAGS) $(LDLIBS)
 
 # Автоматические зависимости от заголовков: изменение include/csolve.h
-# пересобирает все объектные файлы.
-src/%.o: src/%.c
+# пересобирает все объектные файлы. Правило общее, чтобы собирался и
+# vendored-источник third_party/argtable3/argtable3.c.
+%.o: %.c
 	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
 tests/unit_tests: tests/unit_tests.c $(filter-out src/main.o,$(OBJ))

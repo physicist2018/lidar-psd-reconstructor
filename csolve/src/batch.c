@@ -76,7 +76,7 @@ void parse_batch_txt(const char *path, batch_input_t *b)
     memset(b, 0, sizeof(*b));
     FILE *f = fopen(path, "r");
     if (!f)
-        cs_fatal("не удалось открыть файл: %s", path);
+        cs_fatal("failed to open file: %s", path);
 
     char *line = NULL;
     size_t cap = 0;
@@ -110,12 +110,12 @@ void parse_batch_txt(const char *path, batch_input_t *b)
             low[nl] = '\0';
             if (strcmp(low, "altitude") != 0 && strcmp(low, "alt") != 0 &&
                 strcmp(low, "h") != 0)
-                cs_fatal("первое поле заголовка должно быть 'Altitude', "
-                         "получено '%s'", toks[0]);
+                cs_fatal("first header field must be 'Altitude', "
+                         "got '%s'", toks[0]);
             b->nch = nt - 1;
             if (b->nch <= 0)
-                cs_fatal("в заголовке нет ни одного канала "
-                         "(ожидается b/a<Нм>)");
+                cs_fatal("no channels in header "
+                         "(expected b/a<nm>)");
             b->ch = xcalloc((size_t)b->nch, sizeof(batch_channel_t));
             for (int i = 1; i < nt; i++) {
                 const char *nm = toks[i];
@@ -125,8 +125,8 @@ void parse_batch_txt(const char *path, batch_input_t *b)
                     if (!isdigit((unsigned char)*p))
                         digits = 0;
                 if (!digits || (c0 != 'b' && c0 != 'a'))
-                    cs_fatal("неизвестное имя канала '%s' "
-                             "(ожидается b<нм> или a<нм>)", nm);
+                    cs_fatal("unknown channel name '%s' "
+                             "(expected b<nm> or a<nm>)", nm);
                 batch_channel_t *ch = &b->ch[i - 1];
                 ch->kind = c0 == 'b' ? CH_BETA : CH_ALPHA;
                 ch->wl_um = (double)atoi(nm + 1) * 1e-3;
@@ -137,17 +137,17 @@ void parse_batch_txt(const char *path, batch_input_t *b)
         }
 
         if (nt != b->nch + 1)
-            cs_fatal("ожидалось %d коэффициентов на строку, получено %d: '%s'",
+            cs_fatal("expected %d coefficients per row, got %d: '%s'",
                      b->nch, nt - 1, s);
         char *e = NULL;
         double hval = strtod(toks[0], &e);
         if (e == toks[0] || *e)
-            cs_fatal("не удалось разобрать строку '%s'", s);
+            cs_fatal("failed to parse line '%s'", s);
         dvec_push(&alt, hval);
         for (int i = 0; i < b->nch; i++) {
             double v = strtod(toks[i + 1], &e);
             if (e == toks[i + 1] || *e)
-                cs_fatal("не удалось разобрать строку '%s'", s);
+                cs_fatal("failed to parse line '%s'", s);
             dvec_push(&vals, v);
         }
         have_row = 1;
@@ -156,9 +156,9 @@ void parse_batch_txt(const char *path, batch_input_t *b)
     free(line);
 
     if (!have_header)
-        cs_fatal("файл %s пуст", path);
+        cs_fatal("file %s is empty", path);
     if (!have_row)
-        cs_fatal("в файле %s нет строк с высотами", path);
+        cs_fatal("no altitude rows in file %s", path);
     b->n_alt = alt.n;
     b->alt = alt.v;
     b->data = vals.v;
@@ -584,12 +584,12 @@ static void mkdir_p(const char *path)
             continue;
         tmp[i] = '\0';
         if (mkdir(tmp, 0777) != 0 && errno != EEXIST)
-            cs_fatal("не удалось создать каталог %s: %s", tmp,
+            cs_fatal("failed to create directory %s: %s", tmp,
                      strerror(errno));
         tmp[i] = '/';
     }
     if (mkdir(tmp, 0777) != 0 && errno != EEXIST)
-        cs_fatal("не удалось создать каталог %s: %s", tmp, strerror(errno));
+        cs_fatal("failed to create directory %s: %s", tmp, strerror(errno));
     free(tmp);
 }
 
@@ -602,7 +602,7 @@ static char *default_out_dir(const char *batch_path)
     else {
         char cwd[4096];
         if (!getcwd(cwd, sizeof(cwd)))
-            cs_fatal("не удалось получить текущий каталог");
+            cs_fatal("failed to get current directory");
         abs = xasprintf("%s/%s", cwd, batch_path);
     }
     char *slash = strrchr(abs, '/');
@@ -623,7 +623,7 @@ static FILE *open_append(const char *dir, const char *name)
     char *p = xasprintf("%s/%s", dir, name);
     FILE *f = fopen(p, "a");
     if (!f)
-        cs_fatal("не удалось открыть файл для записи: %s", p);
+        cs_fatal("failed to open file for writing: %s", p);
     free(p);
     return f;
 }
@@ -635,12 +635,12 @@ static void write_profile(const char *out_dir, double h,
     char *path = xasprintf("%s/dist_%g.txt", out_dir, h);
     FILE *fd = fopen(path, "w");
     if (!fd)
-        cs_fatal("не удалось открыть файл для записи: %s", path);
-    fprintf(fd, "# высота H = %g м\n", h);
-    fputs("# входные данные (β [1/(м·ср)], α [1/м]): ", fd);
+        cs_fatal("failed to open file for writing: %s", path);
+    fprintf(fd, "# altitude H = %g m\n", h);
+    fputs("# input data (β [1/(m·sr)], α [1/m]): ", fd);
     for (int j = 0; j < b->nch; j++)
         fprintf(fd, "%s%s=%g", j ? " " : "", b->ch[j].name, g1[j]);
-    fputs("\n# r, мкм  dV/dln r, мкм³/см³\n", fd);
+    fputs("\n# r, µm  dV/dln r, µm³/cm³\n", fd);
     for (int i = 0; i < p->nr; i++) {
         double nv = p->n_avg[i] / CM3_PER_M3;
         if (isfinite(nv))
@@ -713,7 +713,7 @@ static void emit_profile(const args_t *a, const char *out_dir, double h,
     }
 
     if (!a->no_plot) {
-        plot_opts_t po = {a->plot_format, a->plot_dpi};
+        plot_opts_t po = {a->plot_format, a->plot_dpi, a->plot_font_size};
         char *pp = xasprintf("%s/plot_%g.%s", out_dir, h,
                              plot_format_ext(a->plot_format));
         plot_profile(&po, pp, prof.r_grid, prof.nr, prof.n_avg, solve_ch,
@@ -747,7 +747,7 @@ static void emit_profile(const args_t *a, const char *out_dir, double h,
         s_str = acc;
     }
 
-    printf("  высота %g м: ⟨m⟩ = %.3f%+.3fj, N = %.3g см⁻³%s\n", h,
+    printf("  altitude %g m: ⟨m⟩ = %.3f%+.3fj, N = %.3g cm⁻³%s\n", h,
            prof.m_re, prof.m_im, prof.moments.N_cm3, s_str);
     free(s_str);
     profile_free(&prof);
@@ -763,23 +763,22 @@ void run_batch(const args_t *a)
 
     double *mre = NULL, *mim = NULL;
     int nm = 0;
-    table_m_grid(a->tables, a->m_reals, a->n_m_reals, a->m_imags,
-                 a->n_m_imags, &mre, &mim, &nm);
+    table_m_grid(a->tables, &mre, &mim, &nm);
 
-    printf("пакетная обработка: %s\n", a->batch);
-    printf("  высот: %d; каналов: %d\n", b.n_alt, b.nch);
+    printf("batch processing: %s\n", a->batch);
+    printf("  altitudes: %d; channels: %d\n", b.n_alt, b.nch);
     for (int j = 0; j < b.nch; j++)
-        printf("  канал: %s (%s, %g нм)\n", b.ch[j].name,
+        printf("  channel: %s (%s, %g nm)\n", b.ch[j].name,
                b.ch[j].kind == CH_BETA ? "beta" : "alpha",
                b.ch[j].wl_um * 1e3);
-    printf("  единицы β [1/(м·ср)], α [1/м]\n");
+    printf("  units: β [1/(m·sr)], α [1/m]\n");
     if (a->lidar_ratio_cons)
-        printf("ограничение плавности лидарного отношения S=α/β с высотой: "
-               "включено (вес %g, итераций <= %d)\n", a->lidar_ratio_w,
+        printf("lidar ratio S=α/β smoothness constraint along altitude: "
+               "enabled (weight %g, iterations <= %d)\n", a->lidar_ratio_w,
                a->lidar_ratio_iter);
     else
-        printf("ограничение плавности лидарного отношения S=α/β с высотой: "
-               "выключено\n");
+        printf("lidar ratio S=α/β smoothness constraint along altitude: "
+               "disabled\n");
 
     /* каналы решения */
     channel_t *solve_ch = xcalloc((size_t)b.nch, sizeof(channel_t));
@@ -806,14 +805,15 @@ void run_batch(const args_t *a)
     }
     double r1_max_eff = a->r1_max < capmin ? a->r1_max : capmin;
     if (r1_max_eff < a->r1_min)
-        cs_fatal("покрытие таблиц по x ограничивает r1_max = %g мкм < "
-                 "r1_min = %g — расширьте таблицы или уменьшите --r1-min",
+        cs_fatal("table coverage in x limits r1_max = %g µm < "
+                 "r1_min = %g — extend the tables or decrease --r1-min",
                  r1_max_eff, a->r1_min);
 
-    printf("табличный режим ядер (внешние сечения), корень: %s\n", a->tables);
-    printf("  λ_ref таблиц = %g мкм (сечения пересчитываются как (λ/λ_ref)²)\n",
-           a->table_ref_wl);
-    printf("  конвенция Cback = %s\n", a->table_cback_4pi ? "4pi" : "dsigma");
+    printf("table-based kernel mode (external cross sections), root: %s\n",
+           a->tables);
+    printf("  table λ_ref = %g µm (cross sections are rescaled as "
+           "(λ/λ_ref)²)\n", a->table_ref_wl);
+    printf("  Cback convention = %s\n", a->table_cback_4pi ? "4pi" : "dsigma");
     {
         channels_t c0;
         load_table_channels(a->tables, mre[0], mim[0], solve_ch, b.nch,
@@ -824,17 +824,17 @@ void run_batch(const args_t *a)
             snprintf(cname, sizeof(cname), "%s(%g nm)",
                      solve_ch[j].kind == CH_BETA ? "beta" : "alpha",
                      solve_ch[j].wl_um * 1e3);
-            printf("  %-14s x_max = %g, r_max = %.3g мкм\n", cname,
+            printf("  %-14s x_max = %g, r_max = %.3g µm\n", cname,
                    c0.ch[j].tab->x_max,
                    c0.ch[j].tab->x_max * c0.ch[j].wl_um / (2.0 * CS_PI));
         }
         channels_free(&c0);
     }
-    printf("  эффективный r1_max = %g мкм (задан: %g) — окна и сетка r "
-           "ограничены\n", r1_max_eff, a->r1_max);
+    printf("  effective r1_max = %g µm (requested: %g) — windows and r grid "
+           "are limited\n", r1_max_eff, a->r1_max);
 
     /* таблицы ядер — один раз на пакет */
-    printf("строим таблицы ядер (%d значений m, один раз на пакет)...\n", nm);
+    printf("building kernel tables (%d m values, once per batch)...\n", nm);
     ktable_t *kts = xcalloc((size_t)nm, sizeof(ktable_t));
     for (int i = 0; i < nm; i++) {
         channels_t c;
@@ -844,7 +844,7 @@ void run_batch(const args_t *a)
         ktable_build(&kts[i], &c, a->r0_min, r1_max_eff, a->dx_max);
         channels_free(&c);
     }
-    printf("  таблица: %d точек по r на каждое m\n", kts[0].n);
+    printf("  table: %d r points per m\n", kts[0].n);
 
     /* матрицы A — тоже один раз */
     double *r0_grid = geomspace(a->r0_min, a->r0_max, a->nr0);
@@ -854,7 +854,7 @@ void run_batch(const args_t *a)
                  a->n_degrees, r0_grid, a->nr0, r1_grid, a->nr1,
                  a->min_ratio, a->n_basis, !a->no_zero_boundary,
                  a->quad_order, a->log_span);
-    printf("  матрицы A предвычислены: %d окон × %d m\n", design.n_w, nm);
+    printf("  matrices A precomputed: %d windows × %d m\n", design.n_w, nm);
 
     char *out_dir = a->batch_out_dir ? xstrdup(a->batch_out_dir)
                                      : default_out_dir(a->batch);
@@ -865,9 +865,10 @@ void run_batch(const args_t *a)
         char *p = xasprintf("%s/moments.txt", out_dir);
         FILE *f = fopen(p, "w");
         if (!f)
-            cs_fatal("не удалось открыть файл для записи: %s", p);
+            cs_fatal("failed to open file for writing: %s", p);
         fputs("# H  Vf  Vc  V  rmf  rmc  rm  reff  N  sigma_f  sigma_c  sigma\n"
-              "# V — мкм³/см³; rm/reff — мкм; N — см⁻³; sigma — безразм.\n", f);
+              "# V — µm³/cm³; rm/reff — µm; N — cm⁻³; "
+              "sigma — dimensionless.\n", f);
         fclose(f);
         free(p);
     }
@@ -875,7 +876,7 @@ void run_batch(const args_t *a)
         char *p = xasprintf("%s/refractive.txt", out_dir);
         FILE *f = fopen(p, "w");
         if (!f)
-            cs_fatal("не удалось открыть файл для записи: %s", p);
+            cs_fatal("failed to open file for writing: %s", p);
         fputs("# H  Re(m)  Im(m)\n", f);
         fclose(f);
         free(p);
@@ -884,12 +885,12 @@ void run_batch(const args_t *a)
         char *p = xasprintf("%s/errors.txt", out_dir);
         FILE *f = fopen(p, "w");
         if (!f)
-            cs_fatal("не удалось открыть файл для записи: %s", p);
+            cs_fatal("failed to open file for writing: %s", p);
         fputs("# H  ", f);
         for (int j = 0; j < b.nch; j++)
             fprintf(f, "%s%s", j ? "  " : "", b.ch[j].name);
-        fputs("  Err\n# относительные ошибки |g_fit-g1|/g1 "
-              "(Err = среднее по каналам)\n", f);
+        fputs("  Err\n# relative errors |g_fit-g1|/g1 "
+              "(Err = mean over channels)\n", f);
         fclose(f);
         free(p);
     }
@@ -922,12 +923,12 @@ void run_batch(const args_t *a)
         char *p = xasprintf("%s/lidar_ratios.txt", out_dir);
         FILE *f = fopen(p, "w");
         if (!f)
-            cs_fatal("не удалось открыть файл для записи: %s", p);
+            cs_fatal("failed to open file for writing: %s", p);
         fputs("# H  ", f);
         for (int k = 0; k < nl; k++)
             fprintf(f, "%sS_%g", k ? "  " : "", common[k].wl * 1e3);
-        fputs("\n# восстановленное лидарное отношение S = α/β "
-              "по общим длинам волн\n", f);
+        fputs("\n# retrieved lidar ratio S = α/β "
+              "at common wavelengths\n", f);
         fclose(f);
         free(p);
     }
@@ -936,18 +937,18 @@ void run_batch(const args_t *a)
         solutions_t *per = xcalloc((size_t)b.n_alt, sizeof(solutions_t));
         for (int h = 0; h < b.n_alt; h++) {
             const double *g1 = b.data + (size_t)h * b.nch;
-            printf("перебор (m, r0, r1, степень)...\n");
+            printf("scan over (m, r0, r1, degree)...\n");
             scan_variants(&design, g1, b.nch, a->gamma_select, a->gamma_rel,
                           a->gamma_min, a->gamma_max, a->ngamma, a->nonneg,
                           !a->absolute, &per[h]);
             if (per[h].n == 0)
-                cs_fatal("нет ни одного допустимого окна [r0, r1]");
-            printf("  высота %g м: вариантов %d\n", b.alt[h], per[h].n);
+                cs_fatal("no valid [r0, r1] window");
+            printf("  altitude %g m: %d variants\n", b.alt[h], per[h].n);
         }
 
-        printf("  применяем ограничение: общие длины волн ");
+        printf("  applying constraint: common wavelengths ");
         for (int k = 0; k < nl; k++)
-            printf("%s%g нм", k ? ", " : "", common[k].wl * 1e3);
+            printf("%s%g nm", k ? ", " : "", common[k].wl * 1e3);
         putchar('\n');
 
         /* S по каждому решению (ключ — исходный id) */
@@ -978,23 +979,23 @@ void run_batch(const args_t *a)
     } else {
         if (a->lidar_ratio_cons) {
             if (b.n_alt < 2)
-                printf("  [предупреждение] --lidar-ratio-cons: нужно >= 2 "
-                       "высот; ограничение не применяется\n");
+                printf("  [warning] --lidar-ratio-cons: at least 2 "
+                       "altitudes required; constraint is not applied\n");
             else
-                printf("  [предупреждение] --lidar-ratio-cons: нет общих "
-                       "длин волн β∩α для лидарного отношения; ограничение "
-                       "не применяется\n");
+                printf("  [warning] --lidar-ratio-cons: no common "
+                       "β∩α wavelengths for the lidar ratio; constraint "
+                       "is not applied\n");
         }
         for (int h = 0; h < b.n_alt; h++) {
             const double *g1 = b.data + (size_t)h * b.nch;
             solutions_t sols;
-            printf("перебор (m, r0, r1, степень)...\n");
+            printf("scan over (m, r0, r1, degree)...\n");
             scan_variants(&design, g1, b.nch, a->gamma_select, a->gamma_rel,
                           a->gamma_min, a->gamma_max, a->ngamma, a->nonneg,
                           !a->absolute, &sols);
             if (sols.n == 0)
-                cs_fatal("нет ни одного допустимого окна [r0, r1]");
-            printf("  высота %g м: вариантов %d\n", b.alt[h], sols.n);
+                cs_fatal("no valid [r0, r1] window");
+            printf("  altitude %g m: %d variants\n", b.alt[h], sols.n);
             emit_profile(a, out_dir, b.alt[h], &b, solve_ch, g1, &sols, kts,
                          mre, mim, nm, design.geom, r1_max_eff, common, nl,
                          write_lidar, &met, h);
@@ -1003,7 +1004,7 @@ void run_batch(const args_t *a)
     }
 
     if (!a->no_plot) {
-        plot_opts_t po = {a->plot_format, a->plot_dpi};
+        plot_opts_t po = {a->plot_format, a->plot_dpi, a->plot_font_size};
         const char *ext = plot_format_ext(a->plot_format);
         char *pp;
         pp = xasprintf("%s/refractive.%s", out_dir, ext);
@@ -1018,7 +1019,7 @@ void run_batch(const args_t *a)
             const double *vals[1] = {err_pct};
             const char *names[1] = {"Err"};
             plot_profiles(&po, pp,
-                          "Средняя относительная ошибка восстановления, %",
+                          "Mean relative retrieval error, %",
                           "Err, %", 1, b.alt, vals, names, b.n_alt);
             free(err_pct);
         }
@@ -1028,8 +1029,8 @@ void run_batch(const args_t *a)
         {
             const double *vals[3] = {met.V, met.Vc, met.Vf};
             const char *names[3] = {"V", "Vc", "Vf"};
-            plot_profiles(&po, pp, "Объёмная концентрация мод",
-                          "V, мкм³/см³", 3, b.alt, vals, names, b.n_alt);
+            plot_profiles(&po, pp, "Volume concentration of modes",
+                          "V, µm³/cm³", 3, b.alt, vals, names, b.n_alt);
         }
         free(pp);
 
@@ -1037,7 +1038,7 @@ void run_batch(const args_t *a)
         {
             const double *vals[3] = {met.rmf, met.rmc, met.reff};
             const char *names[3] = {"rmf", "rmc", "reff"};
-            plot_profiles(&po, pp, "Радиусы мод", "r, мкм", 3, b.alt, vals,
+            plot_profiles(&po, pp, "Mode radii", "r, µm", 3, b.alt, vals,
                           names, b.n_alt);
         }
         free(pp);
@@ -1046,7 +1047,7 @@ void run_batch(const args_t *a)
         {
             const double *vals[1] = {met.Nc};
             const char *names[1] = {"N"};
-            plot_profiles(&po, pp, "Числовая концентрация", "N, см⁻³", 1,
+            plot_profiles(&po, pp, "Number concentration", "N, cm⁻³", 1,
                           b.alt, vals, names, b.n_alt);
         }
         free(pp);
@@ -1055,7 +1056,7 @@ void run_batch(const args_t *a)
         {
             const double *vals[3] = {met.sgf, met.sgc, met.sgo};
             const char *names[3] = {"sigma_f", "sigma_c", "sigma"};
-            plot_profiles(&po, pp, "Ширины логнормальных мод", "sigma", 3,
+            plot_profiles(&po, pp, "Lognormal mode widths", "sigma", 3,
                           b.alt, vals, names, b.n_alt);
         }
         free(pp);
@@ -1072,7 +1073,7 @@ void run_batch(const args_t *a)
                 sbuf[k] = xasprintf("S_{%g}", common[k].wl * 1e3);
                 snames[k] = sbuf[k];
             }
-            plot_profiles(&po, pp, "Лидарное отношение S = α/β", "S = α/β",
+            plot_profiles(&po, pp, "Lidar ratio S = α/β", "S = α/β",
                           nl < 32 ? nl : 32, b.alt, svals, snames, b.n_alt);
             for (int k = 0; k < nl && k < 32; k++)
                 free(sbuf[k]);
@@ -1095,7 +1096,7 @@ void run_batch(const args_t *a)
     free(met.m_im);
     free(met.S);
 
-    printf("пакетная обработка завершена; результаты: %s\n", out_dir);
+    printf("batch processing finished; results: %s\n", out_dir);
 
     free(common);
     free(out_dir);

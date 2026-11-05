@@ -52,7 +52,7 @@ void profile_finalize(profile_t *p, const args_t *a,
         best_idx[t] = m_index_of(mre, mim, nm, sols->sol[t].m_re,
                                  sols->sol[t].m_im);
         if (best_idx[t] < 0)
-            cs_fatal("внутренняя ошибка: m = %g%+gj отсутствует в сетке ядер",
+            cs_fatal("internal error: m = %g%+gj is missing from the kernel grid",
                      sols->sol[t].m_re, sols->sol[t].m_im);
     }
 

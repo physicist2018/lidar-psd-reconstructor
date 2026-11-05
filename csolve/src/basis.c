@@ -79,7 +79,7 @@ void bspline_values(const double *U, int nk, int p, double t, double *out)
     int span = find_span(U, nbf, p, u);
     double N[16], left[16], right[16];
     if (p + 1 > 16)
-        cs_fatal("степень B-сплайна слишком велика");
+        cs_fatal("B-spline degree too large");
     N[0] = 1.0;
     for (int j = 1; j <= p; j++) {
         left[j] = u - U[span + 1 - j];
@@ -261,9 +261,9 @@ void geom_build(geom_t *g, double r0, double r1, int degree, int n_basis,
     memset(g, 0, sizeof(*g));
     int p_internal = n_basis - degree - 1;
     if (p_internal < 0)
-        cs_fatal("нужно n_basis >= degree + 1");
+        cs_fatal("expected n_basis >= degree + 1");
     if (interior_only && n_basis < 3)
-        cs_fatal("граничные условия n(r0)=n(r1)=0 требуют n_basis >= 3");
+        cs_fatal("boundary conditions n(r0)=n(r1)=0 require n_basis >= 3");
 
     int nk = n_basis + degree + 1;
     double *knots = dbl_array(nk);

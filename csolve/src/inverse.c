@@ -246,7 +246,7 @@ void scan_variants(const design_t *d, const double *g1, int nch,
     }
     for (int j = 0; j < nch; j++)
         if (!(g1[j] > 0.0))
-            cs_fatal("все измеренные коэффициенты g1 должны быть положительными");
+            cs_fatal("all measured coefficients g1 must be positive");
     double scale = g1[0];
     for (int j = 1; j < nch; j++)
         if (g1[j] > scale)
@@ -258,9 +258,9 @@ void scan_variants(const design_t *d, const double *g1, int nch,
         weights[j] = relative ? 1.0 / g1n[j] : 1.0;
     }
     if (d->nu > nch)
-        fprintf(stderr, "[предупреждение] неизвестных на окно (%d) больше "
-                        "измерений (%d): решение опирается главным образом на "
-                        "регуляризацию (система недоопределена)\n",
+        fprintf(stderr, "[warning] unknowns per window (%d) exceed measurements "
+                        "(%d): the solution relies mainly on regularization "
+                        "(the system is underdetermined)\n",
                 d->nu, nch);
 
     int nu = d->nu;
